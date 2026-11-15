@@ -62,6 +62,7 @@ from a command or test that was actually run. States: `todo`, `doing`,
 | Closing the known limits (ADR 0017) | done | macOS user presence, `--token-file`, memory wiping, TLS service binding and CRLs, replay protection, anchor mirror, proved by unit tests, server-mode-smoke and quickstart-check in CI |
 | Backups, self-heal and doctor (ADR 0018) | done | `cli_backup.rs`, daemon self-heal tests, quickstart-check step 9 in CI, systemd timer and launchd templates |
 | Protocol version 2: sessions, batch reads, base64 values (ADR 0019) | done | `cofferakd/tests/session_integration.rs` (17 tests) and `session_idle.rs` over a real socket and the listener's own connection handler; all four SDKs run the same session checks in `sdk-smoke.sh` and `server-mode-smoke.sh` (Unix socket and mutual TLS), including waiting out the idle timeout and reconnecting; version 1 still served |
+| Seal backends chosen at run time: key file and Google Cloud KMS (ADR 0020) | done | `seal/file.rs` unit tests; `cofferak-core/tests/seal_gcp_kms.rs` (9 tests, feature `gcp-kms`, against a fake metadata server and KMS); `scripts/seal-backends-check.sh` in CI runs the real `cofferak` and `cofferakd` with both backends, restart durability, a second host and every misconfiguration refused. Not proved: a call to the real Cloud KMS |
 | Benchmarks | done | `scripts/bench.sh`, run in CI on every build, results in `docs/benchmarks.md` |
 
 ## Known gaps / open items

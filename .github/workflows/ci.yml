@@ -40,6 +40,14 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The Cloud KMS seal backend (ADR 0020) is behind a feature that is
+      # off by default, so lint and test it as well.
+      - name: Clippy with the gcp-kms feature
+        run: cargo clippy --workspace --all-targets --features cofferak-core/gcp-kms,cofferakd/gcp-kms,cofferak-cli/gcp-kms -- -D warnings
+
+      - name: Test the Cloud KMS seal backend against a fake KMS
+        run: cargo test -p cofferak-core --features gcp-kms
+
       # systemd-creds' host scope needs root (ADR 0009), so the regular run
       # above skips the real seal/unseal round trip. Re-run just that test
       # binary as root so the real backend is proven, not merely skipped.
@@ -102,6 +110,11 @@ jobs:
       # macos-latest GitHub-hosted runners.
       - name: Run the server-mode (TLS + mutual TLS) smoke test
         run: ./scripts/server-mode-smoke.sh
+
+      # The real CLI and daemon with a host key in a file and with one
+      # sealed by (a stand-in for) Google Cloud KMS, ADR 0020.
+      - name: Run the seal backends check (file, gcp-kms)
+        run: ./scripts/seal-backends-check.sh
 
       # Informational: the numbers behind docs/benchmarks.md, measured on
       # this runner and visible in the job log.

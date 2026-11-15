@@ -20,9 +20,19 @@ hkdf = "0.12"
 aws-lc-rs = "1.19.0"
 base64 = "0.22"
 libc = "0.2"
+# Only for the `gcp-kms` feature: an HTTPS client for Google Cloud KMS, on
+# the same TLS stack as the daemon (rustls on AWS-LC), trusting the public
+# web roots, since that is who signs Google's API certificates.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "json"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7.0"
 
 [dev-dependencies]
 aes-gcm-siv = "0.11.1"
+
+[features]
+# Seal the host key with Google Cloud KMS (ADR 0020). Off by default, so
+# a plain build has no HTTP client and makes no network calls.
+gcp-kms = ["dep:ureq", "dep:rustls"]

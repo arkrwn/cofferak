@@ -113,13 +113,16 @@ flowchart LR
 | | Vault / cloud manager | `.env` file | cofferak |
 |---|---|---|---|
 | Something extra to operate | A cluster or a cloud account | Nothing | One small daemon per host |
-| Where the unlock key lives | Key shares / external KMS | Next to the app (or no key) | Sealed by the OS (TPM2 / Keychain) |
+| Where the unlock key lives | Key shares / external KMS | Next to the app (or no key) | Sealed by the OS (TPM2 / Keychain), or by your cloud KMS in a container |
 | Network hop to read a secret | Yes | No | No (Unix socket), optional mTLS |
 | Per-app least privilege | Yes (policies) | No | Yes (path-prefix tokens) |
 | Post-quantum recovery path | Depends on setup | No | Yes (ML-KEM-1024 hybrid) |
 
 - **No external dependency.** No third-party server to run, no account
-  to create, no call out to any third-party KMS. `cofferakd` is the only
+  to create, no call out to any third-party KMS unless you choose one:
+  in a container, where the OS has nothing to seal a key with, the host
+  key can be sealed by Google Cloud KMS instead
+  ([deployment](deployment.md#containers-and-other-hosts-without-a-tpm-or-keychain)). `cofferakd` is the only
   server involved, and it's yours - local Unix socket by default, or
   your own mutual-TLS endpoint if you turn on server mode.
 - **One codebase, two platforms.** `cofferak-core` (crypto, on-disk

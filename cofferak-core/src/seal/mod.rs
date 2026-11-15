@@ -26,6 +26,83 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{KeychainAnchorMirror, KeychainSeal};
 
+mod file;
+
+pub use file::FileSeal;
+
+#[cfg(feature = "gcp-kms")]
+mod gcp_kms;
+
+#[cfg(feature = "gcp-kms")]
+pub use gcp_kms::{GcpKmsConfig, GcpKmsSeal};
+
+/// The backend chosen at run time with `$COFFERAK_SEAL` (ADR 0020), or
+/// `None` when it is unset or `platform`: then the caller uses the
+/// platform's own backend (systemd-creds, the Keychain), as before.
+///
+/// - `file`: the key is the file `$COFFERAK_HOST_KEY_FILE`. `{host}` in
+///   that path stands for the host id, so several hosts can be enrolled
+///   from one place.
+/// - `gcp-kms`: the key is sealed with the Cloud KMS key
+///   `$COFFERAK_GCP_KMS_KEY`. Needs a build with the `gcp-kms` feature.
+///
+/// The daemon and the CLI both choose through this one function, so they
+/// can never disagree about where a host's key lives.
+pub fn configured_seal(host_id: &str) -> Result<Option<Box<dyn HostSeal>>, SealError> {
+    let choice = std::env::var("COFFERAK_SEAL").unwrap_or_default();
+    match choice.as_str() {
+        "" | "platform" => Ok(None),
+        "file" => {
+            let path = std::env::var("COFFERAK_HOST_KEY_FILE")
+                .ok()
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| {
+                    SealError::Invalid(
+                        "COFFERAK_SEAL=file needs $COFFERAK_HOST_KEY_FILE, the path of the host key file".into(),
+                    )
+                })?;
+            Ok(Some(Box::new(FileSeal {
+                path: path.replace("{host}", host_id).into(),
+            })))
+        }
+        "gcp-kms" => gcp_kms_seal(host_id).map(Some),
+        other => Err(SealError::Invalid(format!(
+            "unknown $COFFERAK_SEAL {other:?}, expected platform, file or gcp-kms"
+        ))),
+    }
+}
+
+#[cfg(feature = "gcp-kms")]
+fn gcp_kms_seal(host_id: &str) -> Result<Box<dyn HostSeal>, SealError> {
+    Ok(Box::new(GcpKmsSeal {
+        config: GcpKmsConfig::from_env()?,
+        host_id: host_id.to_string(),
+    }))
+}
+
+#[cfg(not(feature = "gcp-kms"))]
+fn gcp_kms_seal(_host_id: &str) -> Result<Box<dyn HostSeal>, SealError> {
+    Err(SealError::Invalid(
+        "this build of cofferak has no Cloud KMS support, build it with `--features gcp-kms`"
+            .into(),
+    ))
+}
+
+/// A backend that fails every call with `message`. Lets a caller that
+/// must hand back a `HostSeal` report a configuration error at the point
+/// the key is first needed, with the real reason.
+pub struct FailingSeal(pub String);
+
+impl HostSeal for FailingSeal {
+    fn seal(&self, _key: &[u8; 32]) -> Result<SealedBlob, SealError> {
+        Err(SealError::Invalid(self.0.clone()))
+    }
+
+    fn unseal(&self, _blob: &SealedBlob) -> Result<[u8; 32], SealError> {
+        Err(SealError::Invalid(self.0.clone()))
+    }
+}
+
 /// An opaque, host-sealed blob produced by a [`HostSeal`] implementation.
 ///
 /// The bytes are only meaningful to the backend (and host) that produced

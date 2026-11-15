@@ -30,3 +30,7 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError"] }
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext", "LAError", "block2"] }
 block2 = "0.6"
+
+[features]
+# Seal the host key with Google Cloud KMS (ADR 0020).
+gcp-kms = ["cofferak-core/gcp-kms", "cofferakd/gcp-kms"]

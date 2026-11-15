@@ -8,7 +8,7 @@
 <p align="center">
   <strong>A military-grade, superfast coffer for your secrets and credentials.</strong><br>
   CNSA 2.0 algorithms · post-quantum recovery key · mutual TLS 1.3 · 0.24 µs decrypt · sub-millisecond reads<br>
-  Self-hosted on Linux and macOS. No external server, cloud KMS or account.
+  Self-hosted on Linux and macOS. No external server, cloud KMS or account needed.
 </p>
 
 <p align="center">

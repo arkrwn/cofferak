@@ -11,7 +11,7 @@ hide:
 
 **A military-grade, superfast coffer for your secrets and credentials.**
 
-Self-hosted on Linux and macOS. No external server, cloud KMS or account.
+Self-hosted on Linux and macOS. No external server, cloud KMS or account needed.
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
 [How it works](overview.md){ .md-button }

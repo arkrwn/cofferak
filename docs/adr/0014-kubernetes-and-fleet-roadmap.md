@@ -78,6 +78,17 @@ updated docs, as every feature so far has.
   implementation before positioning cofferak as a Vault replacement for
   clusters.
 
+## Progress
+
+- **Done: protocol version 2** ([ADR 0019](0019-protocol-v2-sessions.md)),
+  the base for workload authentication: one authentication per
+  connection with a named method, batch reads.
+- **Done: unseal key without a TPM** ([ADR 0020](0020-runtime-seal-backends.md)),
+  the first item of phase 1: a key file (a Kubernetes Secret) or Google
+  Cloud KMS, chosen with `$COFFERAK_SEAL`.
+- Next: the container image, Helm chart and kind test of phase 1, then
+  workload authentication (phase 2).
+
 ## Until then
 
 - Use cofferak where it fits today (single hosts, VMs, CI, laptops, edge,
