@@ -29,6 +29,20 @@ echo "== build (release, --features gcp-kms) =="
 cargo build --release --quiet --features gcp-kms -p cofferak-cli -p cofferakd
 CLI="$REPO_ROOT/target/release/cofferak"
 DAEMON="$REPO_ROOT/target/release/cofferakd"
+# How the daemon is started. On macOS it is `cofferak daemon`: the rollback
+# anchor is mirrored in the Keychain, which only serves an item without a
+# prompt to the binary that created it, and the admin commands below create
+# it with `cofferak` (ADR 0007). A separate `cofferakd` would wait forever
+# on a Keychain prompt nobody can answer.
+DAEMON_CMD=("$DAEMON")
+# Host ids. On macOS they are unique to this run, and their Keychain anchor
+# items are removed on exit, so one run can't leave an anchor behind that a
+# later run with the same host id would be checked against.
+HA="pod-a${COFFERAK_CHECK_SUFFIX:-}" HB="pod-b${COFFERAK_CHECK_SUFFIX:-}" HK="kms-a${COFFERAK_CHECK_SUFFIX:-}"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  DAEMON_CMD=("$CLI" daemon)
+  HA="pod-a-$$" HB="pod-b-$$" HK="kms-a-$$"
+fi
 FAKE="$REPO_ROOT/scripts/fake-gcp-kms.py"
 [[ -x "$CLI" && -x "$DAEMON" ]] || { echo "binaries missing after build" >&2; exit 1; }
 
@@ -37,6 +51,11 @@ PIDS=""
 cleanup() {
   for p in $PIDS; do kill "$p" 2>/dev/null || true; done
   for p in $PIDS; do wait "$p" 2>/dev/null || true; done
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    for h in "$HA" "$HB" "$HK"; do
+      security delete-generic-password -s cofferak-anchor -a "$h" >/dev/null 2>&1 || true
+    done
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -53,7 +72,7 @@ untrack() { local keep=""; for p in $PIDS; do [[ "$p" == "$1" ]] || keep="$keep 
 start_daemon() {
   local log="$1" sock="$2"; shift 2
   rm -f "$sock"
-  env COFFERAK_SOCKET="$sock" "$@" "$DAEMON" >"$log" 2>&1 &
+  env COFFERAK_SOCKET="$sock" "$@" "${DAEMON_CMD[@]}" >"$log" 2>&1 &
   DPID=$!
   PIDS="$PIDS $DPID"
 }
@@ -108,23 +127,23 @@ export COFFERAK_DATA_DIR="$DATA_A"
 export COFFERAK_SEAL=file
 export COFFERAK_HOST_KEY_FILE="$KEYDIR/{host}.key"
 "$CLI" init --root >/dev/null
-"$CLI" init --host pod-a
+"$CLI" init --host $HA
 TOKEN="$("$CLI" enroll-service myapp --paths myapp --perm rw | grep -E '^[0-9a-f]{64}$')"
 [[ -n "$TOKEN" ]] || fail "could not parse the service token"
 
 step "A2. key file is 32 bytes, 0600; neither vault nor .seal contain it"
-KEY_A="$KEYDIR/pod-a.key"
+KEY_A="$KEYDIR/$HA.key"
 [[ -f "$KEY_A" ]] || fail "no key file at $KEY_A"
 [[ "$(size_of "$KEY_A")" == "32" ]] || fail "key file is not 32 bytes"
 [[ "$(mode_of "$KEY_A")" == "600" ]] || fail "key file mode is $(mode_of "$KEY_A"), expected 600"
-[[ "$(cat "$DATA_A/hosts/pod-a.seal")" == "cofferak-file-seal-v1" ]] || fail "pod-a.seal is not exactly the marker"
+[[ "$(cat "$DATA_A/hosts/$HA.seal")" == "cofferak-file-seal-v1" ]] || fail "$HA.seal is not exactly the marker"
 KEYHEX="$(hex_of "$KEY_A")"
 if hex_of "$DATA_A/vault.cofferak" | grep -q "$KEYHEX"; then fail "raw key found in vault.cofferak"; fi
-if hex_of "$DATA_A/hosts/pod-a.seal" | grep -q "$KEYHEX"; then fail "raw key found in pod-a.seal"; fi
+if hex_of "$DATA_A/hosts/$HA.seal" | grep -q "$KEYHEX"; then fail "raw key found in $HA.seal"; fi
 unset KEYHEX
 
 step "A3. daemon serves; path outside the grant is denied"
-start_daemon "$WORK/a1.log" "$SOCK_A" COFFERAK_HOST_ID=pod-a
+start_daemon "$WORK/a1.log" "$SOCK_A" COFFERAK_HOST_ID=$HA
 wait_socket "$DPID" "$SOCK_A" "$WORK/a1.log"
 DPID_A="$DPID"
 export COFFERAK_SOCKET="$SOCK_A"
@@ -135,42 +154,42 @@ if "$CLI" get other/thing >/dev/null 2>&1; then fail "path outside myapp was not
 
 step "A4. restart: the value is durable"
 stop_daemon "$DPID_A"
-start_daemon "$WORK/a2.log" "$SOCK_A" COFFERAK_HOST_ID=pod-a
+start_daemon "$WORK/a2.log" "$SOCK_A" COFFERAK_HOST_ID=$HA
 wait_socket "$DPID" "$SOCK_A" "$WORK/a2.log"
 DPID_A="$DPID"
 [[ "$("$CLI" get myapp/A)" == "value-1" ]] || fail "value lost across restart"
 
 step "A5. a second 'init --host pod-a' fails and leaves the key untouched"
 SUM_BEFORE="$(cksum <"$KEY_A")"
-if "$CLI" init --host pod-a >"$WORK/reinit.log" 2>&1; then fail "second init --host pod-a succeeded"; fi
+if "$CLI" init --host $HA >"$WORK/reinit.log" 2>&1; then fail "second init --host $HA succeeded"; fi
 [[ "$(cksum <"$KEY_A")" == "$SUM_BEFORE" ]] || fail "key file changed by the failed init"
 [[ "$(mode_of "$KEY_A")" == "600" ]] || fail "key file mode changed"
 
 step "A6. enroll a second host (pod-b) and serve from it"
 stop_daemon "$DPID_A"
-"$CLI" enroll-host --this-host pod-a pod-b
-[[ "$(size_of "$KEYDIR/pod-b.key")" == "32" ]] || fail "pod-b key file is not 32 bytes"
+"$CLI" enroll-host --this-host $HA $HB
+[[ "$(size_of "$KEYDIR/$HB.key")" == "32" ]] || fail "$HB key file is not 32 bytes"
 SOCK_B="$WORK/b.sock"
-start_daemon "$WORK/b.log" "$SOCK_B" COFFERAK_HOST_ID=pod-b
+start_daemon "$WORK/b.log" "$SOCK_B" COFFERAK_HOST_ID=$HB
 wait_socket "$DPID" "$SOCK_B" "$WORK/b.log"
 DPID_B="$DPID"
-[[ "$(COFFERAK_SOCKET="$SOCK_B" "$CLI" get myapp/A)" == "value-1" ]] || fail "pod-b cannot read myapp/A"
+[[ "$(COFFERAK_SOCKET="$SOCK_B" "$CLI" get myapp/A)" == "value-1" ]] || fail "$HB cannot read myapp/A"
 stop_daemon "$DPID_B"
 unset COFFERAK_SOCKET COFFERAK_TOKEN
 
 step "A7. broken key material: the daemon refuses to start"
 expect_refusal "missing key file" "$WORK/n1.sock" "$WORK/n1.log" "could not read host key file" \
-  COFFERAK_HOST_ID=pod-a COFFERAK_HOST_KEY_FILE="$KEYDIR/nonexistent.key"
+  COFFERAK_HOST_ID=$HA COFFERAK_HOST_KEY_FILE="$KEYDIR/nonexistent.key"
 head -c 31 "$KEY_A" >"$KEYDIR/short.key"
 expect_refusal "key file truncated to 31 bytes" "$WORK/n2.sock" "$WORK/n2.log" "expected 32" \
-  COFFERAK_HOST_ID=pod-a COFFERAK_HOST_KEY_FILE="$KEYDIR/short.key"
+  COFFERAK_HOST_ID=$HA COFFERAK_HOST_KEY_FILE="$KEYDIR/short.key"
 head -c 32 /dev/urandom >"$KEYDIR/wrong.key"
 cmp -s "$KEYDIR/wrong.key" "$KEY_A" && fail "random key equals the real key"
 # the wrong key is well-formed, so only the message is unknown: any text matches ""
 expect_refusal "wrong 32-byte key" "$WORK/n3.sock" "$WORK/n3.log" "" \
-  COFFERAK_HOST_ID=pod-a COFFERAK_HOST_KEY_FILE="$KEYDIR/wrong.key"
+  COFFERAK_HOST_ID=$HA COFFERAK_HOST_KEY_FILE="$KEYDIR/wrong.key"
 expect_refusal "unknown seal backend" "$WORK/n4.sock" "$WORK/n4.log" 'unknown $COFFERAK_SEAL' \
-  COFFERAK_HOST_ID=pod-a COFFERAK_SEAL=bogus
+  COFFERAK_HOST_ID=$HA COFFERAK_SEAL=bogus
 [[ "$(cksum <"$KEY_A")" == "$SUM_BEFORE" ]] || fail "key file changed during the negative cases"
 
 # ---------------------------------------------------------------- Part B
@@ -203,16 +222,16 @@ DATA_B="$WORK/b"; mkdir -m 700 "$DATA_B"
 SOCK_K="$WORK/k.sock"
 export COFFERAK_DATA_DIR="$DATA_B"
 "$CLI" init --root >/dev/null
-"$CLI" init --host kms-a
+"$CLI" init --host $HK
 TOKEN="$("$CLI" enroll-service myapp --paths myapp --perm rw | grep -E '^[0-9a-f]{64}$')"
 [[ -n "$TOKEN" ]] || fail "could not parse the service token"
-[[ "$(sed -n 1p "$DATA_B/hosts/kms-a.seal")" == "cofferak-gcp-kms-seal-v1" ]] || fail "kms-a.seal line 1"
-[[ "$(sed -n 2p "$DATA_B/hosts/kms-a.seal")" == "$KMS_KEY" ]] || fail "kms-a.seal line 2 is not the key name"
+[[ "$(sed -n 1p "$DATA_B/hosts/$HK.seal")" == "cofferak-gcp-kms-seal-v1" ]] || fail "$HK.seal line 1"
+[[ "$(sed -n 2p "$DATA_B/hosts/$HK.seal")" == "$KMS_KEY" ]] || fail "$HK.seal line 2 is not the key name"
 
 step "B3. daemon: round trip, restart, read back"
 count() { grep -c -- "$1" "$FAKE_LOG" || true; }
 D0="$(count ':decrypt')"
-start_daemon "$WORK/k1.log" "$SOCK_K" COFFERAK_HOST_ID=kms-a
+start_daemon "$WORK/k1.log" "$SOCK_K" COFFERAK_HOST_ID=$HK
 wait_socket "$DPID" "$SOCK_K" "$WORK/k1.log"
 DPID_K="$DPID"
 [[ "$(count ':decrypt')" -gt "$D0" ]] || fail "first daemon start made no :decrypt call"
@@ -221,7 +240,7 @@ printf 'kms-value' | "$CLI" set myapp/K --stdin
 [[ "$("$CLI" get myapp/K)" == "kms-value" ]] || fail "kms round trip"
 stop_daemon "$DPID_K"
 D1="$(count ':decrypt')"
-start_daemon "$WORK/k2.log" "$SOCK_K" COFFERAK_HOST_ID=kms-a
+start_daemon "$WORK/k2.log" "$SOCK_K" COFFERAK_HOST_ID=$HK
 wait_socket "$DPID" "$SOCK_K" "$WORK/k2.log"
 DPID_K="$DPID"
 [[ "$(count ':decrypt')" -gt "$D1" ]] || fail "second daemon start made no :decrypt call"
@@ -238,23 +257,23 @@ if grep -q 'fake-token\|kms-value' "$FAKE_LOG"; then fail "fake log leaks a toke
 
 step "B5. negative: wrong KMS key, no metadata server, damaged .seal, no KMS"
 expect_refusal "other KMS key" "$WORK/m1.sock" "$WORK/m1.log" "$OTHER_KEY" \
-  COFFERAK_HOST_ID=kms-a COFFERAK_GCP_KMS_KEY="$OTHER_KEY"
+  COFFERAK_HOST_ID=$HK COFFERAK_GCP_KMS_KEY="$OTHER_KEY"
 grep -qF -- "$KMS_KEY" "$WORK/m1.log" || fail "other KMS key: message does not name the sealing key"
 
 CLOSED="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
 expect_refusal "no metadata server" "$WORK/m2.sock" "$WORK/m2.log" "metadata server" \
-  COFFERAK_HOST_ID=kms-a GCE_METADATA_HOST="127.0.0.1:$CLOSED" PATH="$STUB"
+  COFFERAK_HOST_ID=$HK GCE_METADATA_HOST="127.0.0.1:$CLOSED" PATH="$STUB"
 
 cp -R "$DATA_B" "$WORK/b-damaged"; chmod 700 "$WORK/b-damaged"
 awk 'NR==3 { print ($0 ~ /^A/ ? "B" : "A") substr($0, 2); next } { print }' \
-  "$DATA_B/hosts/kms-a.seal" >"$WORK/b-damaged/hosts/kms-a.seal"
-cmp -s "$DATA_B/hosts/kms-a.seal" "$WORK/b-damaged/hosts/kms-a.seal" && fail "failed to damage the .seal copy"
+  "$DATA_B/hosts/$HK.seal" >"$WORK/b-damaged/hosts/$HK.seal"
+cmp -s "$DATA_B/hosts/$HK.seal" "$WORK/b-damaged/hosts/$HK.seal" && fail "failed to damage the .seal copy"
 expect_refusal "damaged ciphertext" "$WORK/m3.sock" "$WORK/m3.log" "" \
-  COFFERAK_HOST_ID=kms-a COFFERAK_DATA_DIR="$WORK/b-damaged"
+  COFFERAK_HOST_ID=$HK COFFERAK_DATA_DIR="$WORK/b-damaged"
 
 step "B6. negative: KMS gone, the daemon fails instead of hanging"
 stop_daemon "$FAKE_PID"
 expect_refusal "KMS killed" "$WORK/m4.sock" "$WORK/m4.log" "" \
-  COFFERAK_HOST_ID=kms-a PATH="$STUB"
+  COFFERAK_HOST_ID=$HK PATH="$STUB"
 
 echo "== seal backends check passed (file, gcp-kms) =="
