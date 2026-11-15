@@ -25,6 +25,7 @@ libc = "0.2"
 # web roots, since that is who signs Google's API certificates.
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "json"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"], optional = true }
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7.0"

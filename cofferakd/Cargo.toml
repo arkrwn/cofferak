@@ -30,3 +30,6 @@ x509-parser = "0.17"
 [features]
 # Seal the host key with Google Cloud KMS (ADR 0020).
 gcp-kms = ["cofferak-core/gcp-kms"]
+
+[dev-dependencies]
+aws-lc-rs = "1.19.0"

@@ -124,6 +124,11 @@ impl Aad {
         Self::ctx("peer", name)
     }
 
+    /// For the workload identity configuration (ADR 0022).
+    pub fn workload() -> Self {
+        Self::ctx("workload", "")
+    }
+
     fn host_wrap(host_id: &str) -> Self {
         Self::ctx("host-wrap", host_id)
     }

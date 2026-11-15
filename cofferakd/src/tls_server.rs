@@ -372,10 +372,12 @@ fn handle_tls_connection(
             in_session = true;
             let limits = crate::session::SessionLimits::from_env();
             let sock = &reader.get_ref().sock;
-            deadline = sock
-                .try_clone()
-                .ok()
-                .map(|s| crate::protocol::enforce_deadline(s, limits.lifetime));
+            deadline = sock.try_clone().ok().map(|s| {
+                crate::protocol::enforce_deadline(
+                    s,
+                    limits.lifetime_for(session.identity_expires_at()),
+                )
+            });
             let _ = sock.set_read_timeout(Some(limits.idle));
         }
     }

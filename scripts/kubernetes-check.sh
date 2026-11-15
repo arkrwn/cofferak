@@ -12,7 +12,13 @@
 #   - a client outside the cluster, through a port-forward, reads and writes
 #     secrets with all four kinds of check the SDK smoke tests make (mTLS,
 #     token bound to its certificate, denied paths, sessions)
+#   - a REAL Kubernetes ServiceAccount token (`kubectl create token`, signed
+#     by the cluster) authenticates a workload with no static token (ADR 0022):
+#     the issuer and public keys come from the API server, the subject is bound
+#     to a service inside the pod, a token for another audience, another
+#     ServiceAccount or a tampered one is refused
 #   - the data survives the pod being deleted, without initialising again
+#     (and the workload configuration with it)
 #
 # Needs: kubectl pointing at a cluster that can run the image, helm, python3,
 # openssl. The image must already be in the cluster (kind load docker-image).
@@ -159,6 +165,63 @@ PY
 then fail "a client without a certificate was served"; fi
 pf_stop
 
+step "workload identity: a real ServiceAccount token, no static token"
+k create serviceaccount app1 >/dev/null
+k create serviceaccount app2 >/dev/null
+ISSUER="$(kubectl get --raw /.well-known/openid-configuration | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])')"
+kubectl get --raw /openid/v1/jwks >"$WORK/jwks.json"
+python3 -c 'import json,sys; ks=json.load(open(sys.argv[1]))["keys"]; assert ks and all(k["kty"]=="RSA" for k in ks), ks' "$WORK/jwks.json" \
+  || fail "the cluster's JWKS has no RSA keys, the check expects the default signing key"
+k exec -i "$POD" -- /usr/local/bin/cofferak workload add-issuer k8s \
+  --iss "$ISSUER" --audience cofferak --jwks - <"$WORK/jwks.json" >/dev/null \
+  || fail "could not add the cluster as an issuer"
+k exec "$POD" -- /usr/local/bin/cofferak workload bind app1-sa \
+  --issuer k8s --subject "system:serviceaccount:$NS:app1" --service "$SERVICE" >/dev/null \
+  || fail "could not bind the ServiceAccount"
+k exec "$POD" -- /usr/local/bin/cofferak workload list | grep -q "system:serviceaccount:$NS:app1" \
+  || fail "workload list does not show the binding"
+export JWT_OK JWT_OTHER_AUD JWT_APP2
+JWT_OK="$(k create token app1 --audience cofferak --duration 10m)"
+JWT_OTHER_AUD="$(k create token app1 --audience someone-else --duration 10m)"
+JWT_APP2="$(k create token app2 --audience cofferak --duration 10m)"
+pf_start
+sdk_py - <<PY
+$connect_py
+import os
+from cofferak_sdk import DeniedError
+with c.session_jwt(lambda: os.environ["JWT_OK"]) as s:
+    assert s.service == "$SERVICE", s.service
+    s.set("app/from-sa-token", b"no static token was used")
+    assert s.get("app/from-sa-token") == b"no static token was used"
+    for path in ("other/x",):
+        try:
+            s.get(path)
+            raise AssertionError("a path outside the service's prefix was served")
+        except DeniedError:
+            pass
+tampered = os.environ["JWT_OK"]
+tampered = tampered[:-3] + ("AAA" if tampered[-3:] != "AAA" else "BBB")
+os.environ["JWT_TAMPERED"] = tampered
+for name, why in (("JWT_OTHER_AUD", "a token for another audience"),
+                  ("JWT_APP2", "a ServiceAccount that is not bound"),
+                  ("JWT_TAMPERED", "a tampered token")):
+    try:
+        c.session_jwt(lambda n=name: os.environ[n])
+        raise AssertionError(why + " was accepted")
+    except DeniedError:
+        pass
+PY
+pf_stop
+k exec "$POD" -- /usr/local/bin/cofferak audit tail --count 40 >"$WORK/audit.txt"
+grep -q "ok: jwt issuer k8s subject system:serviceaccount:$NS:app1" "$WORK/audit.txt" \
+  || { cat "$WORK/audit.txt" >&2; fail "the audit log has no login by the ServiceAccount"; }
+grep -q "denied: wrong audience" "$WORK/audit.txt" || fail "the audit log does not say why the other audience was refused"
+grep -q "denied: subject is not bound" "$WORK/audit.txt" || fail "the audit log does not say why app2 was refused"
+grep -q "denied: bad signature" "$WORK/audit.txt" || fail "the audit log does not say why the tampered token was refused"
+if grep -qF "$JWT_OK" "$WORK/audit.txt" || grep -qF "$(cut -d. -f3 <<<"$JWT_OK")" "$WORK/audit.txt"; then
+  fail "a token is in the audit log"
+fi
+
 step "delete the pod: the data is still there, no new initialisation"
 k delete pod "$POD" --wait=true >/dev/null
 for _ in $(seq 1 60); do k get pod "$POD" >/dev/null 2>&1 && break; sleep 1; done
@@ -169,6 +232,15 @@ sdk_py - <<PY
 $connect_py
 assert c.get(t, "app/persisted") == b"survives-a-pod-restart", "the secret is gone after the restart"
 PY
+# The workload configuration is in the vault, so the ServiceAccount still works.
+export JWT_AGAIN
+JWT_AGAIN="$(k create token app1 --audience cofferak --duration 10m)"
+sdk_py - <<PY
+$connect_py
+import os
+with c.session_jwt(lambda: os.environ["JWT_AGAIN"]) as s:
+    assert s.get("app/from-sa-token") == b"no static token was used", "the secret written with the SA token is gone"
+PY
 pf_stop
 
-echo "== kubernetes check passed (chart, empty-volume start, init in pod, mTLS client, restart) =="
+echo "== kubernetes check passed (chart, empty-volume start, init in pod, mTLS client, ServiceAccount token, restart) =="

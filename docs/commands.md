@@ -13,7 +13,12 @@ other users could read it with `ps`.
 | `init --root` | Create a brand-new vault and a hybrid root keypair (X25519 + ML-KEM-1024). Prints the root private key once, as an armored block. |
 | `init --host <id>` | Enroll the *first* host into a vault created by `init --root`. |
 | `enroll-host <new-id> --this-host <id>` | Enroll an *additional* host, using an already-enrolled host's own sealed key to recover the DEK. |
-| `enroll-service <id> --paths <csv> --perm <ro\|rw>` | Enroll a consuming service and print its one-time access token. |
+| `enroll-service <id> --paths <csv> --perm <ro\|rw>` | Enroll a consuming service and print its one-time access token. `--identity-only` prints no token: the service is then reachable only by a workload bound to it (below). |
+| `workload add-issuer <name> --iss <url> --audience <aud> --jwks <file\|->` | Trust an identity provider (`--alg`, `--leeway`, `--max-ttl`, `--replace`). See [workload identity](workload-identity.md). |
+| `workload update-jwks <name> --jwks <file\|->` | Replace an issuer's public keys after the provider rotated them. |
+| `workload rm-issuer <name>` | Stop trusting an issuer and remove the bindings that use it. |
+| `workload bind <name> --issuer <i> --subject <sub> --service <id>` | Let the workload whose token has exactly this subject act as an enrolled service. |
+| `workload unbind <name>` / `workload list` | Remove a binding / show issuers and bindings. Changes apply to a running daemon at once, open sessions included. |
 | `set <path> --stdin` / `--from-file <f>` / `<value>` | Write a secret (over the daemon socket). `--stdin` and `--from-file` keep the value out of argv and shell history, use them for real secrets. |
 | `get <path> [-o <file>]` | Read a secret (over the daemon socket); `-o` writes the exact bytes to a `0600` file. |
 | `rm <path>` | Remove a secret (over the daemon socket). |

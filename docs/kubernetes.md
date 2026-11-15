@@ -5,12 +5,14 @@ in [`deployment/helm/cofferak`](https://github.com/arkrwn/cofferak/tree/main/dep
 ([ADR 0021](adr/0021-container-image-and-helm-chart.md)).
 
 !!! warning "Read this first"
-    This is **phase 1** of the [Kubernetes roadmap](adr/0014-kubernetes-and-fleet-roadmap.md).
-    It gives you a vault in a pod, reachable over mutual TLS. It does not
-    yet give you ServiceAccount-based authentication, delivery into pods,
-    replicas or an independent security audit. Services authenticate with
-    a static token, and the vault is one pod: while it restarts, reads
-    fail. If you need those today, keep HashiCorp Vault for the cluster.
+    This is **phases 1 and 2** of the [Kubernetes roadmap](adr/0014-kubernetes-and-fleet-roadmap.md).
+    It gives you a vault in a pod, reachable over mutual TLS, where
+    workloads can sign in with their ServiceAccount token
+    ([workload identity](workload-identity.md)) or a static token. It does
+    not yet give you delivery into pods (an init container or CSI
+    driver), replicas, or an independent security audit. The vault is one
+    pod: while it restarts, reads fail. If you need those today, keep
+    HashiCorp Vault for the cluster.
 
 ## What you need
 
@@ -118,6 +120,10 @@ kubectl exec -n cofferak cofferak-0 -- \
 The token is printed once. Give it to the service as you would any
 credential (a Kubernetes Secret, for example), and read secrets with an
 [SDK](sdks.md#sessions).
+
+**Or skip the static token:** let the pod sign in with its ServiceAccount
+token. Enroll the service with `--identity-only` and bind the
+ServiceAccount to it, see [workload identity](workload-identity.md#kubernetes).
 
 ## Reaching it from other pods: mutual TLS
 

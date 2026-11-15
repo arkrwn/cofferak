@@ -89,7 +89,13 @@ updated docs, as every feature so far has.
 - **Done: container image, Helm chart and kind test**
   ([ADR 0021](0021-container-image-and-helm-chart.md)), which completes
   phase 1. Guide: [kubernetes.md](../kubernetes.md).
-- Next: workload authentication with ServiceAccount tokens (phase 2).
+- **Done: workload authentication** ([ADR 0022](0022-workload-identity.md)),
+  phase 2. It is offline JWT verification against keys kept in the vault
+  rather than the `TokenReview` API, so it also serves GitHub, GitLab and
+  Google tokens, and it does not see that a pod was deleted until its token
+  expires. Keys are updated by hand for now.
+- Next: JWKS fetched from a URL with rate-limited refresh, then delivery
+  into pods (phase 3).
 
 ## Until then
 

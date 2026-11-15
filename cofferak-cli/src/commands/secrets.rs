@@ -201,6 +201,15 @@ pub fn run_rotate_dek(
         *peer = encrypt_entry(&new_dek, &aad, &plaintext);
     }
 
+    if let Some(workload) = vault.workload.as_mut() {
+        let aad = Aad::workload();
+        let plaintext = Zeroizing::new(
+            decrypt_entry(&old_dek, &aad, workload)
+                .map_err(|e| CliError::Io(std::io::Error::other(e)))?,
+        );
+        *workload = encrypt_entry(&new_dek, &aad, &plaintext);
+    }
+
     if vault.root_wrap.is_some() {
         vault.root_wrap = Some(
             wrap_dek_for_root(&new_dek, &vault.root_pubkey)

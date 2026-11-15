@@ -111,6 +111,12 @@ jobs:
       - name: Run the server-mode (TLS + mutual TLS) smoke test
         run: ./scripts/server-mode-smoke.sh
 
+      # Workload identity (ADR 0022): the real binaries with real signed
+      # tokens, every kind of bad token, revocation of an open session, and
+      # all four SDKs including reconnecting with a fresh token file.
+      - name: Run the workload identity check (raw protocol and all four SDKs)
+        run: ./scripts/workload-check.sh
+
       # The real CLI and daemon with a host key in a file and with one
       # sealed by (a stand-in for) Google Cloud KMS, ADR 0020.
       - name: Run the seal backends check (file, gcp-kms)

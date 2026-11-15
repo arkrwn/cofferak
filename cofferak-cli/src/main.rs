@@ -193,6 +193,11 @@ enum Command {
     /// Manage trusted peer coffers (who may send you transfers, and whom
     /// you can export to with `export --to`).
     Peer(PeerArgs),
+    /// Let workloads authenticate with a signed identity token (a
+    /// Kubernetes ServiceAccount token, a CI job's OIDC token) instead of
+    /// a static service token: trusted issuers, and which subject acts as
+    /// which service.
+    Workload(WorkloadArgs),
     /// After restoring an older vault backup on purpose: accept the vault
     /// now on disk (it must be an authentic copy of this vault). Restart
     /// the daemon afterwards.
@@ -258,6 +263,11 @@ struct EnrollServiceArgs {
     /// Access level granted over `--paths`.
     #[arg(long = "perm", value_enum)]
     perm: PermArg,
+
+    /// Do not print the service's token: it can then only be reached by
+    /// workloads bound to it with `cofferak workload bind`.
+    #[arg(long)]
+    identity_only: bool,
 
     /// Vault data directory. Defaults to the platform data dir, or
     /// `$COFFERAK_DATA_DIR` if set.
@@ -547,6 +557,78 @@ enum PeerCommand {
     List,
     /// Stop trusting a peer.
     Rm { name: String },
+}
+
+#[derive(Args)]
+struct WorkloadArgs {
+    #[command(subcommand)]
+    command: WorkloadCommand,
+    /// Vault data directory. Defaults to `$COFFERAK_DATA_DIR` / the platform data dir.
+    #[arg(long, value_name = "DIR", global = true)]
+    data_dir: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum WorkloadCommand {
+    /// Trust an identity provider: its `iss`, the one audience tokens must
+    /// be issued for, and its public keys (a JWKS file, `-` reads standard
+    /// input).
+    AddIssuer {
+        /// A short name for this issuer, used by `bind`.
+        name: String,
+        /// The exact `iss` value of its tokens, for a Kubernetes cluster
+        /// the cluster's issuer URL.
+        #[arg(long = "iss", value_name = "URL")]
+        issuer: String,
+        /// The audience tokens must name. Use a value for cofferak (for
+        /// example `cofferak`), not the issuer's own URL.
+        #[arg(long, value_name = "AUD")]
+        audience: String,
+        /// The public keys of the issuer, a JWKS document.
+        #[arg(long, value_name = "FILE")]
+        jwks: PathBuf,
+        /// Signature algorithms accepted, comma separated.
+        #[arg(long, value_name = "CSV", default_value = "RS256,ES256,ES384")]
+        alg: String,
+        /// Clock leeway for exp and nbf, in seconds (at most 300).
+        #[arg(long, value_name = "SECS", default_value_t = cofferak_core::workload::DEFAULT_LEEWAY_SECS)]
+        leeway: u64,
+        /// Longest remaining validity of an accepted token, in seconds.
+        #[arg(long, value_name = "SECS", default_value_t = cofferak_core::workload::DEFAULT_MAX_TTL_SECS)]
+        max_ttl: u64,
+        /// Replace an existing issuer with this name.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Replace an issuer's public keys after the provider rotated them.
+    UpdateJwks {
+        name: String,
+        /// The new JWKS document (`-` reads standard input).
+        #[arg(long, value_name = "FILE")]
+        jwks: PathBuf,
+    },
+    /// Stop trusting an issuer, and remove every binding that uses it.
+    RmIssuer { name: String },
+    /// Let the workload whose token has exactly this subject act as an
+    /// enrolled service: it gets that service's paths and permission.
+    Bind {
+        /// A name for this binding.
+        name: String,
+        /// Which issuer's tokens (its name).
+        #[arg(long, value_name = "ISSUER")]
+        issuer: String,
+        /// The exact `sub` value. No patterns. For Kubernetes
+        /// `system:serviceaccount:<namespace>:<name>`.
+        #[arg(long, value_name = "SUB")]
+        subject: String,
+        /// The service to act as (see `enroll-service`).
+        #[arg(long, value_name = "SERVICE")]
+        service: String,
+    },
+    /// Remove a binding.
+    Unbind { name: String },
+    /// List issuers and bindings.
+    List,
 }
 
 #[derive(Args)]
@@ -850,6 +932,12 @@ fn main() {
                     args.perm.into_permission(),
                 )
             }) {
+                Ok(token) if args.identity_only => {
+                    println!(
+                        "service '{}' enrolled without a shown token: only workloads bound with `cofferak workload bind` can act as it",
+                        token.service_id
+                    );
+                }
                 Ok(token) => {
                     // This is the one deliberate point where the CLI
                     // exposes a service's secret: the operator needs it to
@@ -980,6 +1068,7 @@ fn main() {
         Command::Import(args) => cmd_import(args),
         Command::Identity(args) => cmd_identity(args),
         Command::Peer(args) => cmd_peer(args),
+        Command::Workload(args) => cmd_workload(args),
         Command::AcceptRestore(args) => cmd_accept_restore(args),
         Command::Backup(args) => cmd_backup(args),
         Command::Doctor(args) => cmd_doctor(args),
@@ -1478,6 +1567,161 @@ fn cmd_peer(args: PeerArgs) {
                 fail("peer rm", format!("no peer named {name}"));
             }
         }
+    }
+}
+
+/// Read a JWKS from a file or, for `-`, standard input, at most
+/// [`cofferak_core::workload::MAX_JWKS_BYTES`] bytes.
+fn read_jwks(path: &Path) -> String {
+    use std::io::Read;
+    let limit = cofferak_core::workload::MAX_JWKS_BYTES as u64 + 1;
+    let mut text = String::new();
+    let result = if path.as_os_str() == "-" {
+        std::io::stdin().take(limit).read_to_string(&mut text)
+    } else {
+        std::fs::File::open(path).and_then(|f| f.take(limit).read_to_string(&mut text))
+    };
+    result.unwrap_or_else(|e| fail("workload", format!("{}: {e}", path.display())));
+    if text.len() as u64 >= limit {
+        fail(
+            "workload",
+            format!(
+                "{} is larger than {} bytes, that is not a JWKS",
+                path.display(),
+                cofferak_core::workload::MAX_JWKS_BYTES
+            ),
+        );
+    }
+    text
+}
+
+fn cmd_workload(args: WorkloadArgs) {
+    use commands::workload::{run_change_with_seal, run_list_with_seal, Change};
+    let data_dir = resolve_data_dir(args.data_dir);
+    let change = match args.command {
+        WorkloadCommand::List => {
+            let config = with_admin_lock(&data_dir, || {
+                with_local_host(&data_dir, |h, seal| run_list_with_seal(&data_dir, h, seal))
+            })
+            .unwrap_or_else(|e| fail("workload list", e));
+            print_workload(&config);
+            return;
+        }
+        WorkloadCommand::AddIssuer {
+            name,
+            issuer,
+            audience,
+            jwks,
+            alg,
+            leeway,
+            max_ttl,
+            replace,
+        } => {
+            require_valid_id("issuer", &name);
+            let algorithms: Vec<cofferak_core::workload::JwtAlg> = alg
+                .split(',')
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .map(|a| {
+                    cofferak_core::workload::JwtAlg::parse(a).unwrap_or_else(|| {
+                        fail(
+                            "workload add-issuer",
+                            format!("unknown algorithm {a:?}, allowed: RS256, ES256, ES384"),
+                        )
+                    })
+                })
+                .collect();
+            Change::AddIssuer {
+                name,
+                issuer,
+                audience,
+                algorithms,
+                jwks: read_jwks(&jwks),
+                leeway_secs: leeway,
+                max_ttl_secs: max_ttl,
+                replace,
+            }
+        }
+        WorkloadCommand::UpdateJwks { name, jwks } => {
+            require_valid_id("issuer", &name);
+            Change::UpdateJwks {
+                name,
+                jwks: read_jwks(&jwks),
+            }
+        }
+        WorkloadCommand::RmIssuer { name } => Change::RmIssuer { name },
+        WorkloadCommand::Bind {
+            name,
+            issuer,
+            subject,
+            service,
+        } => {
+            require_valid_id("binding", &name);
+            require_valid_id("service", &service);
+            Change::Bind {
+                name,
+                issuer,
+                subject,
+                service,
+            }
+        }
+        WorkloadCommand::Unbind { name } => Change::Unbind { name },
+    };
+    let what = match &change {
+        Change::AddIssuer { name, .. } => format!("trusting issuer '{name}'"),
+        Change::UpdateJwks { name, .. } => format!("updated the keys of issuer '{name}'"),
+        Change::RmIssuer { name } => format!("no longer trusting issuer '{name}'"),
+        Change::Bind {
+            name,
+            subject,
+            service,
+            ..
+        } => format!("binding '{name}': {subject} acts as service '{service}'"),
+        Change::Unbind { name } => format!("removed binding '{name}'"),
+    };
+    let outcome = with_admin_lock(&data_dir, || {
+        with_local_host(&data_dir, |h, seal| {
+            run_change_with_seal(&data_dir, h, seal, change.clone())
+        })
+    })
+    .unwrap_or_else(|e| fail("workload", e));
+    println!("{what}");
+    for b in &outcome.dropped_bindings {
+        println!("  also removed binding '{b}' (it used that issuer)");
+    }
+    println!("a running daemon applies this without a restart");
+}
+
+fn print_workload(config: &cofferak_core::workload::WorkloadConfig) {
+    if config.issuers.is_empty() {
+        println!("no trusted issuers (add one with `cofferak workload add-issuer`)");
+        return;
+    }
+    println!("issuers:");
+    for (name, i) in &config.issuers {
+        let algs: Vec<&str> = i.algorithms.iter().map(|a| a.name()).collect();
+        println!("  {name}");
+        println!("    iss       {}", i.issuer);
+        println!("    audience  {}", i.audience);
+        println!("    algs      {}", algs.join(","));
+        println!(
+            "    keys      {}",
+            cofferak_core::workload::key_ids(&i.jwks).join(", ")
+        );
+        println!(
+            "    leeway    {}s, longest accepted validity {}s",
+            i.leeway_secs, i.max_ttl_secs
+        );
+    }
+    println!("bindings:");
+    if config.bindings.is_empty() {
+        println!("  none (bind one with `cofferak workload bind`)");
+    }
+    for (name, b) in &config.bindings {
+        println!(
+            "  {name}: {} / {} -> service {}",
+            b.issuer, b.subject, b.service
+        );
     }
 }
 

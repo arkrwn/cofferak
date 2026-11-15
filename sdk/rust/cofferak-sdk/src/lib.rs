@@ -29,6 +29,22 @@
 //! let password = session.get("myapp/DB_PASSWORD").unwrap();
 //! let config = session.get_all("myapp").unwrap(); // path -> value
 //! ```
+//!
+//! Workload identity (ADR 0022): a session can authenticate with a JWT
+//! instead of a service token, for example the projected service account
+//! token file Kubernetes keeps rotating. The file is read again on every
+//! connect and reconnect, so a session carries on with the fresh token once
+//! the old one has expired.
+//!
+//! ```no_run
+//! use cofferak_sdk::Client;
+//!
+//! let client = Client::connect("/run/cofferak/cofferakd.sock");
+//! let mut session = client
+//!     .session_jwt_file("/var/run/secrets/tokens/cofferak")
+//!     .unwrap();
+//! let password = session.get("myapp/DB_PASSWORD").unwrap();
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufReader, Write};
@@ -353,9 +369,50 @@ impl Client {
     /// [`SdkError::Denied`] if the token is not accepted and
     /// [`SdkError::Protocol`] if the daemon is too old for sessions.
     pub fn session(&self, token: &str) -> Result<Session, SdkError> {
+        self.open_session(CredentialSource::Token(token.to_string()))
+    }
+
+    /// Open a session that authenticates as a workload with a JWT (ADR
+    /// 0022). `provider` returns the current token and is called on every
+    /// connect and every reconnect, so it can hand out a rotated token.
+    /// Returns [`SdkError::Denied`] if the daemon does not accept the token
+    /// (the reason is only in the daemon's audit log); an error from
+    /// `provider` is returned unchanged. The token is never put into an
+    /// error message.
+    ///
+    /// When the token expires the daemon closes the connection; the next
+    /// call reconnects, asks `provider` again and carries on if the new
+    /// token is accepted.
+    pub fn session_jwt<F>(&self, provider: F) -> Result<Session, SdkError>
+    where
+        F: Fn() -> Result<String, SdkError> + Send + Sync + 'static,
+    {
+        self.open_session(CredentialSource::Jwt(Box::new(provider)))
+    }
+
+    /// Like [`Client::session_jwt`], with the token read from `path`
+    /// (surrounding whitespace trimmed). The file is read again on every
+    /// connect and reconnect, as a Kubernetes projected token file is
+    /// replaced by the kubelet before it expires.
+    pub fn session_jwt_file(&self, path: impl AsRef<Path>) -> Result<Session, SdkError> {
+        let path = path.as_ref().to_path_buf();
+        self.session_jwt(move || {
+            let content = std::fs::read_to_string(&path)?;
+            let jwt = content.trim();
+            if jwt.is_empty() {
+                return Err(SdkError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("token file {} is empty", path.display()),
+                )));
+            }
+            Ok(jwt.to_string())
+        })
+    }
+
+    fn open_session(&self, source: CredentialSource) -> Result<Session, SdkError> {
         let mut session = Session {
             transport: self.transport.clone(),
-            token: token.to_string(),
+            source,
             stream: None,
             service: String::new(),
         };
@@ -597,16 +654,29 @@ impl Stream {
     }
 }
 
+/// Where a session gets the credential it authenticates with.
+enum CredentialSource {
+    /// A service token, `Auth` method "token".
+    Token(String),
+    /// Asked on every (re)connect for a workload JWT, `Auth` method "jwt".
+    Jwt(Box<dyn Fn() -> Result<String, SdkError> + Send + Sync>),
+}
+
 /// An authenticated connection to cofferakd (protocol version 2), from
-/// [`Client::session`].
+/// [`Client::session`], [`Client::session_jwt`] or
+/// [`Client::session_jwt_file`].
 ///
 /// One connection carries every call, so over TLS the handshake is paid
 /// once instead of once per secret. If the daemon closes the connection
 /// (it does after an idle period), the next call reconnects and
-/// authenticates again without the caller noticing.
+/// authenticates again without the caller noticing. A JWT session asks
+/// for the token again on each reconnect, so it also carries on after the
+/// token it began with has expired.
+///
+/// There is deliberately no `Debug` for this type: it holds a credential.
 pub struct Session {
     transport: Transport,
-    token: String,
+    source: CredentialSource,
     stream: Option<Stream>,
     service: String,
 }
@@ -623,15 +693,21 @@ impl Session {
     }
 
     fn connect(&mut self) -> Result<(), SdkError> {
+        // Ask for the credential first: a provider error must not leave a
+        // connection open, and is returned as it is.
+        let (method, credential) = match &self.source {
+            CredentialSource::Token(token) => ("token", token.clone()),
+            CredentialSource::Jwt(provider) => ("jwt", provider()?),
+        };
         self.stream = Some(Stream::open(&self.transport)?);
-        let result = self.handshake();
+        let result = self.handshake(method, &credential);
         if result.is_err() {
             self.stream = None;
         }
         result
     }
 
-    fn handshake(&mut self) -> Result<(), SdkError> {
+    fn handshake(&mut self, method: &str, credential: &str) -> Result<(), SdkError> {
         match self.roundtrip(&SessionRequest::Hello { version: 2 }) {
             Ok(SessionResponse::Hello { .. }) => {}
             Ok(_) | Err(SdkError::Protocol(_)) => {
@@ -643,11 +719,7 @@ impl Session {
             }
             Err(e) => return Err(e),
         }
-        let token = self.token.clone();
-        match self.roundtrip(&SessionRequest::Auth {
-            method: "token",
-            credential: &token,
-        })? {
+        match self.roundtrip(&SessionRequest::Auth { method, credential })? {
             SessionResponse::Authed { service } => {
                 self.service = service;
                 Ok(())

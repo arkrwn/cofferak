@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,7 +27,9 @@ const maxBatchPaths = 256
 // time.
 type Session struct {
 	client *Client
-	token  string
+	// source gives the authentication method and credential for every
+	// (re)connect: the static token, or a fresh JWT from the provider.
+	source func() (method, credential string, err error)
 
 	mu      sync.Mutex
 	conn    net.Conn
@@ -38,7 +42,49 @@ type Session struct {
 // DeniedError if the token is not accepted and ProtocolError if the
 // daemon is too old for sessions.
 func (c *Client) Session(token string) (*Session, error) {
-	s := &Session{client: c, token: token}
+	return c.openSession(func() (string, string, error) { return "token", token, nil })
+}
+
+// SessionJWT opens a session for a workload identity: it authenticates
+// with the JWT that provider returns. The provider is called on every
+// connect and reconnect, so it can hand out a fresh token after the old
+// one expired (the daemon closes the connection of an expired workload
+// token, the next call reconnects with a new one). Everything else works
+// as for Session. It returns DeniedError if the daemon does not accept the
+// JWT; an error from provider is returned wrapped, never as DeniedError.
+// The JWT is never included in an error message.
+func (c *Client) SessionJWT(provider func() (string, error)) (*Session, error) {
+	if provider == nil {
+		return nil, errors.New("cofferak: SessionJWT needs a provider")
+	}
+	return c.openSession(func() (string, string, error) {
+		jwt, err := provider()
+		if err != nil {
+			return "", "", fmt.Errorf("obtaining the JWT: %w", err)
+		}
+		if jwt == "" {
+			return "", "", errors.New("obtaining the JWT: the provider returned an empty token")
+		}
+		return "jwt", jwt, nil
+	})
+}
+
+// SessionJWTFile is SessionJWT with the JWT read from the file at path
+// (surrounding whitespace and newlines are trimmed). The file is read again
+// on every connect and reconnect, so a token that something else rotates
+// in place, like a Kubernetes projected service account token, is picked up.
+func (c *Client) SessionJWTFile(path string) (*Session, error) {
+	return c.SessionJWT(func() (string, error) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("reading the JWT file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	})
+}
+
+func (c *Client) openSession(source func() (string, string, error)) (*Session, error) {
+	s := &Session{client: c, source: source}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.connect(); err != nil {
@@ -47,7 +93,8 @@ func (c *Client) Session(token string) (*Session, error) {
 	return s, nil
 }
 
-// Service is the service id the daemon knows this session's token as.
+// Service is the service id the daemon knows this session's credential
+// (token or JWT) as.
 func (s *Session) Service() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -72,6 +119,10 @@ func (s *Session) drop() error {
 
 func (s *Session) connect() error {
 	s.drop()
+	method, credential, err := s.source()
+	if err != nil {
+		return err
+	}
 	conn, err := s.client.dial()
 	if err != nil {
 		return err
@@ -95,7 +146,7 @@ func (s *Session) connect() error {
 		return fail(ProtocolError{Message: "this cofferakd does not support sessions (protocol version 2), upgrade it or use the per-call Client methods"})
 	}
 
-	raw, err = s.roundtrip(map[string]any{"Auth": map[string]string{"method": "token", "credential": s.token}})
+	raw, err = s.roundtrip(map[string]any{"Auth": map[string]string{"method": method, "credential": credential}})
 	if err != nil {
 		return fail(err)
 	}

@@ -5,3 +5,4 @@ pub mod dotenv;
 pub mod format;
 pub mod identity;
 pub mod seal;
+pub mod workload;

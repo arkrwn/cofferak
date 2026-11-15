@@ -92,6 +92,7 @@ nav:
   - Operate:
       - Deployment: deployment.md
       - Kubernetes: kubernetes.md
+      - Workload identity: workload-identity.md
       - Backup and health: backup.md
       - Migration: migration.md
       - Recovery runbook: recovery-runbook.md
@@ -124,6 +125,7 @@ nav:
           - "0019 Protocol version 2: sessions, batch reads, base64": adr/0019-protocol-v2-sessions.md
           - "0020 Seal backends chosen at run time: key file, Cloud KMS": adr/0020-runtime-seal-backends.md
           - "0021 Container image, Helm chart, waiting for initialisation": adr/0021-container-image-and-helm-chart.md
+          - "0022 Workload identity: sign in with an identity token": adr/0022-workload-identity.md
   - Development:
       - development.md
       - Progress: PROGRESS.md

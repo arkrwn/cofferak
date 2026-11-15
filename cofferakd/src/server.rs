@@ -478,10 +478,12 @@ pub fn handle_connection(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) {
             in_session = true;
             let limits = crate::session::SessionLimits::from_env();
             // Dropping the old guard stands the short deadline down.
-            deadline = writer
-                .try_clone()
-                .ok()
-                .map(|s| crate::protocol::enforce_deadline(s, limits.lifetime));
+            deadline = writer.try_clone().ok().map(|s| {
+                crate::protocol::enforce_deadline(
+                    s,
+                    limits.lifetime_for(session.identity_expires_at()),
+                )
+            });
             let _ = writer.set_read_timeout(Some(limits.idle));
         }
     }

@@ -31,15 +31,27 @@ read many values in one round trip::
     with client.session("my-token") as s:
         password = s.get("myapp/DB_PASSWORD")
         config = s.get_all("myapp")          # {path: value} for a prefix
+
+Workload identity (JWT sessions): instead of a cofferak token, a workload
+presents a JWT issued by its platform (for example a Kubernetes projected
+service account token). The credential is read again on every connect and
+reconnect, so a rotated token is picked up without restarting::
+
+    with client.session_jwt_file("/var/run/secrets/tokens/cofferak") as s:
+        password = s.get("myapp/DB_PASSWORD")
+
+    with client.session_jwt(lambda: fetch_current_jwt()) as s:
+        ...
 """
 
 from __future__ import annotations
 
 import base64 as _base64
 import json
+import os as _os
 import socket as _socket
 import ssl as _ssl
-from typing import Any
+from typing import Any, Callable
 
 # Mirrors cofferakd's protocol::MAX_LINE_BYTES (and the Rust/Go SDKs'
 # identical constant) - a hard ceiling on one response line, so a
@@ -197,6 +209,35 @@ class Client:
         :class:`ProtocolError` if the daemon is too old for sessions."""
         return Session(self, token)
 
+    def session_jwt(self, provider: Callable[[], str]) -> Session:
+        """Open a session (protocol version 2) as a workload identity:
+        authenticate with a JWT instead of a cofferak token. ``provider``
+        is a zero-argument callable returning the current JWT string; it
+        is called on every connect and on every reconnect (for example
+        after the JWT expired and the daemon closed the connection), so
+        it should return the freshest token. Raises :class:`DeniedError`
+        if the JWT is not accepted (the reason is only in the daemon's
+        audit log). Exceptions raised by ``provider`` propagate
+        unchanged. The JWT never appears in an error message."""
+        if not callable(provider):
+            raise TypeError("provider must be a callable returning the JWT")
+        return Session(self, jwt_provider=provider)
+
+    def session_jwt_file(self, path: "str | _os.PathLike[str]") -> Session:
+        """Like :meth:`session_jwt`, with the JWT read from the file at
+        ``path`` (surrounding whitespace and the trailing newline are
+        stripped). The file is read again on every connect and reconnect,
+        so a token rotated in place (a Kubernetes projected service
+        account token, refreshed by the kubelet) is used from then on. A
+        missing or unreadable file raises its :class:`OSError` unchanged."""
+        file_path = _os.fspath(path)
+
+        def read_jwt() -> str:
+            with open(file_path, encoding="utf-8") as f:
+                return f.read()
+
+        return Session(self, jwt_provider=read_jwt)
+
     @staticmethod
     def _read_line_bounded(sock: Any) -> bytes:
         """Read until ``\\n`` or ``_MAX_LINE_BYTES``, whichever comes
@@ -269,20 +310,52 @@ class Session:
     One connection carries every call, so over TLS the handshake is paid
     once instead of once per secret. If the daemon closes the connection
     (it does after an idle period), the next call reconnects and
-    authenticates again without the caller noticing.
+    authenticates again without the caller noticing. A JWT session
+    (:meth:`Client.session_jwt`, :meth:`Client.session_jwt_file`) asks for
+    the current JWT on every reconnect, so it keeps working across a token
+    rotation; once a JWT has expired and cannot be replaced, the
+    reconnect raises :class:`DeniedError`.
 
     Not safe to share between threads without a lock: open one session
     per thread.
     """
 
-    def __init__(self, client: Client, token: str) -> None:
+    def __init__(
+        self,
+        client: Client,
+        token: str | None = None,
+        *,
+        jwt_provider: Callable[[], str] | None = None,
+    ) -> None:
+        if (token is None) == (jwt_provider is None):
+            raise ValueError("give exactly one of token and jwt_provider")
         self._client = client
+        # The credential source: a static token, or a provider of JWTs.
         self._token = token
+        self._jwt_provider = jwt_provider
         self._sock: Any = None
         self._buf = b""
         #: The service id the daemon knows this token as.
         self.service: str = ""
         self._connect()
+
+    def __repr__(self) -> str:
+        # Never include the credential.
+        kind = "jwt" if self._jwt_provider is not None else "token"
+        return f"<cofferak_sdk.Session {kind} service={self.service!r}>"
+
+    def _credential(self) -> tuple[str, str]:
+        """The ``(method, credential)`` to authenticate with now."""
+        if self._jwt_provider is None:
+            assert self._token is not None
+            return "token", self._token
+        jwt = self._jwt_provider()
+        if not isinstance(jwt, str):
+            raise TypeError("the JWT provider must return a str")
+        jwt = jwt.strip()
+        if not jwt:
+            raise ValueError("the JWT provider returned an empty token")
+        return "jwt", jwt
 
     def __enter__(self) -> Session:
         return self
@@ -301,6 +374,9 @@ class Session:
 
     def _connect(self) -> None:
         self.close()
+        # Ask for the credential first: a provider error (file missing)
+        # propagates as is, before any connection is opened.
+        method, credential = self._credential()
         self._sock = self._client._open()
         try:
             hello = self._roundtrip({"Hello": {"version": 2}})
@@ -310,7 +386,7 @@ class Session:
                     "upgrade it or use the per-call Client methods"
                 )
             authed = self._roundtrip(
-                {"Auth": {"method": "token", "credential": self._token}}
+                {"Auth": {"method": method, "credential": credential}}
             )
             if authed == "Denied":
                 raise DeniedError()
