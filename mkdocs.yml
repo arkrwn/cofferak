@@ -91,6 +91,7 @@ nav:
       - Server mode: server-mode.md
   - Operate:
       - Deployment: deployment.md
+      - Kubernetes: kubernetes.md
       - Backup and health: backup.md
       - Migration: migration.md
       - Recovery runbook: recovery-runbook.md
@@ -122,6 +123,7 @@ nav:
           - "0018 Backups, self-healing on deletion, and `cofferak doctor`": adr/0018-backup-self-heal-and-doctor.md
           - "0019 Protocol version 2: sessions, batch reads, base64": adr/0019-protocol-v2-sessions.md
           - "0020 Seal backends chosen at run time: key file, Cloud KMS": adr/0020-runtime-seal-backends.md
+          - "0021 Container image, Helm chart, waiting for initialisation": adr/0021-container-image-and-helm-chart.md
   - Development:
       - development.md
       - Progress: PROGRESS.md

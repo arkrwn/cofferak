@@ -25,6 +25,7 @@ exactly one enrolled host.
 | `COFFERAK_SOCKET` | Path of the Unix socket the daemon listens on | `/run/cofferak/cofferakd.sock` | `~/Library/Application Support/cofferak/cofferakd.sock` |
 | `COFFERAK_HOST_ID` | Which enrolled host this process runs as | - (required if more than one host is enrolled) | - (same) |
 | `COFFERAK_SEAL` | Where this host's unseal key lives: `platform`, `file` or `gcp-kms` ([below](#containers-and-other-hosts-without-a-tpm-or-keychain)). Set it the same for the daemon and for admin commands | `platform` (`systemd-creds`) | `platform` (Keychain) |
+| `COFFERAK_WAIT_FOR_INIT` | `1`: when there is no vault yet (or no enrolled host), wait and say so instead of exiting. For containers that start on an empty volume ([Kubernetes](kubernetes.md)). A damaged vault is still refused | off | off |
 | `COFFERAK_HOST_KEY_FILE` | With `COFFERAK_SEAL=file`: path of the key file, `{host}` stands for the host id | - | - |
 | `COFFERAK_GCP_KMS_KEY` | With `COFFERAK_SEAL=gcp-kms`: `projects/<project>/locations/<location>/keyRings/<ring>/cryptoKeys/<key>` | - | - |
 | `COFFERAK_GCP_KMS_ENDPOINT` | Optional private endpoint for Cloud KMS, `https` only | `https://cloudkms.googleapis.com` | same |
@@ -246,6 +247,8 @@ characters on macOS (108 on Linux). Keep `COFFERAK_SOCKET` short, the
 default above is fine for normal account names.
 
 ## Containers and other hosts without a TPM or Keychain
+
+On Kubernetes, use the Helm chart: [Running cofferak on Kubernetes](kubernetes.md).
 
 A container has no `systemd-creds` and no Keychain. Choose where the
 host's unseal key lives with `COFFERAK_SEAL`

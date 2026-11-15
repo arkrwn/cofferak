@@ -214,6 +214,71 @@ pub fn load_host_key(host_id: &str, data_dir: &Path) -> Result<KeyBytes, String>
         })
 }
 
+/// Whether `$COFFERAK_WAIT_FOR_INIT` asks the daemon to wait for a vault
+/// instead of exiting when there is none yet (ADR 0021).
+fn wait_for_init_enabled() -> bool {
+    matches!(
+        std::env::var("COFFERAK_WAIT_FOR_INIT").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Why the daemon can't start serving from `data_dir` yet, or `None` when
+/// it can try: the vault exists, loads, and names the host this process
+/// runs as. Only "not initialised yet" is a reason to wait. A vault that
+/// exists but is damaged is not: that is reported by the normal startup
+/// path, which refuses to start.
+pub fn not_initialised(data_dir: &Path) -> Option<String> {
+    let path = data_dir.join("vault.cofferak");
+    if !path.exists() {
+        return Some(format!(
+            "no vault at {} yet, create one with `cofferak init --root`",
+            path.display()
+        ));
+    }
+    let vault = VaultFile::load(&path).ok()?;
+    if vault.hosts.is_empty() {
+        return Some(
+            "the vault has no host yet, enroll this one with `cofferak init --host <id>`".into(),
+        );
+    }
+    None
+}
+
+/// Block until the vault in `data_dir` is initialised. For a container:
+/// the pod starts with an empty volume, and the operator then runs
+/// `cofferak init --root` and `cofferak init --host` inside it. Exiting
+/// instead would only restart the container in a loop meanwhile.
+fn wait_for_init(data_dir: &Path) {
+    // The data directory must be private to this user (`cofferak doctor`
+    // checks it). On a fresh volume, create it that way now, before an
+    // admin command creates it with whatever the umask gives.
+    if !data_dir.exists() {
+        use std::os::unix::fs::DirBuilderExt;
+        if let Err(e) = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(data_dir)
+        {
+            eprintln!(
+                "cofferakd: could not create data directory {}: {e}",
+                data_dir.display()
+            );
+        }
+    }
+    let mut last = String::new();
+    while let Some(reason) = not_initialised(data_dir) {
+        if reason != last {
+            eprintln!("cofferakd: waiting for initialisation: {reason}");
+            last = reason;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    if !last.is_empty() {
+        eprintln!("cofferakd: vault initialised, starting");
+    }
+}
+
 /// Run the daemon until the process is killed: load the vault, obtain this
 /// host's key, unwrap the DEK, then serve the Unix socket (and the TLS
 /// listener when server mode is configured). Configuration comes from the
@@ -232,6 +297,10 @@ pub fn run() {
     crate::hardening::harden_process();
     crate::hardening::enable_anchor_mirror();
     let data_dir = data_dir();
+
+    if wait_for_init_enabled() {
+        wait_for_init(&data_dir);
+    }
 
     // Thin wrapper: `load_vault_or_exit` itself only ever returns `Result`;
     // this is the one place that turns a load failure into a process exit.
@@ -439,6 +508,31 @@ mod tests {
             nanos,
             n
         ))
+    }
+
+    #[test]
+    fn a_data_dir_is_not_initialised_until_a_host_is_enrolled() {
+        let dir = temp_dir("wait-init");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(not_initialised(&dir).unwrap().contains("init --root"));
+
+        let (root_pubkey, _) = cofferak_core::crypto::generate_root_keypair().unwrap();
+        let mut vault = VaultFile::new(root_pubkey);
+        let path = dir.join("vault.cofferak");
+        vault.save(&path).unwrap();
+        assert!(not_initialised(&dir).unwrap().contains("init --host"));
+
+        vault.hosts.insert(
+            "pod-a".into(),
+            cofferak_core::crypto::wrap_dek_for_host(&[1; 32], "pod-a", &[2; 32]),
+        );
+        vault.save(&path).unwrap();
+        assert_eq!(not_initialised(&dir), None);
+
+        // A damaged vault is not "waiting": startup must see it and refuse.
+        std::fs::write(&path, b"garbage").unwrap();
+        assert_eq!(not_initialised(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

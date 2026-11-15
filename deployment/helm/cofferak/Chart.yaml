@@ -1,0 +1,9 @@
+apiVersion: v2
+name: cofferak
+description: cofferak secrets vault, one replica with persistent storage
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/arkrwn/cofferak
+sources:
+  - https://github.com/arkrwn/cofferak

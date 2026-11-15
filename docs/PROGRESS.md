@@ -63,6 +63,7 @@ from a command or test that was actually run. States: `todo`, `doing`,
 | Backups, self-heal and doctor (ADR 0018) | done | `cli_backup.rs`, daemon self-heal tests, quickstart-check step 9 in CI, systemd timer and launchd templates |
 | Protocol version 2: sessions, batch reads, base64 values (ADR 0019) | done | `cofferakd/tests/session_integration.rs` (17 tests) and `session_idle.rs` over a real socket and the listener's own connection handler; all four SDKs run the same session checks in `sdk-smoke.sh` and `server-mode-smoke.sh` (Unix socket and mutual TLS), including waiting out the idle timeout and reconnecting; version 1 still served |
 | Seal backends chosen at run time: key file and Google Cloud KMS (ADR 0020) | done | `seal/file.rs` unit tests; `cofferak-core/tests/seal_gcp_kms.rs` (9 tests, feature `gcp-kms`, against a fake metadata server and KMS); `scripts/seal-backends-check.sh` in CI runs the real `cofferak` and `cofferakd` with both backends, restart durability, a second host and every misconfiguration refused. Not proved: a call to the real Cloud KMS |
+| Container image, Helm chart, waiting for initialisation (ADR 0021) | doing | Built and run by hand as `docker run --read-only --cap-drop ALL` through init, readiness and restart; `cofferakd` unit test for the wait. `scripts/kubernetes-check.sh` on kind runs in CI, it has not run on a cluster yet. `done` when that job is green |
 | Benchmarks | done | `scripts/bench.sh`, run in CI on every build, results in `docs/benchmarks.md` |
 
 ## Known gaps / open items
@@ -76,6 +77,9 @@ from a command or test that was actually run. States: `todo`, `doing`,
 - **The daemon handles requests one at a time behind one lock.** With
   sessions (ADR 0019) connection setup is no longer the cost of a read,
   that lock is. Reads could share it.
+- **Kubernetes: phase 1 only.** One replica, static tokens over mutual
+  TLS. No ServiceAccount authentication, delivery into pods, HA or
+  dynamic secrets yet ([ADR 0014](adr/0014-kubernetes-and-fleet-roadmap.md)).
 - **The CLI still speaks protocol version 1**, one request per process.
 - **`rotate-dek` needs a daemon restart.** Other admin changes
   (`enroll-service`, `import`, removing a service) are reloaded live

@@ -1,0 +1,197 @@
+{{- $backend := .Values.seal.backend -}}
+{{- if not (has $backend (list "gcp-kms" "file")) -}}
+{{- fail (printf "seal.backend must be gcp-kms or file, got %q" $backend) -}}
+{{- end -}}
+{{- if and (eq $backend "gcp-kms") (not .Values.seal.gcpKms.key) -}}
+{{- fail "seal.backend is gcp-kms: set seal.gcpKms.key to the Cloud KMS key's full name, or use seal.backend=file on a development cluster" -}}
+{{- end -}}
+{{- if and .Values.tls.enabled (not .Values.tls.existingSecret) -}}
+{{- fail "tls.enabled needs tls.existingSecret, a Secret with tls.crt, tls.key and ca.crt" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cofferak.fullname" . }}
+  labels:
+    {{- include "cofferak.labels" . | nindent 4 }}
+spec:
+  # One replica: the vault is one file with one writer. More replicas would
+  # each have their own, different vault.
+  replicas: 1
+  serviceName: {{ include "cofferak.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "cofferak.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cofferak.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "cofferak.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cofferakd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: COFFERAK_DATA_DIR
+              value: /var/lib/cofferak/data
+            - name: COFFERAK_SOCKET
+              value: /run/cofferak/cofferakd.sock
+            - name: COFFERAK_HOST_ID
+              value: {{ include "cofferak.hostId" . | quote }}
+            # Start with an empty volume and wait for `cofferak init`.
+            - name: COFFERAK_WAIT_FOR_INIT
+              value: "1"
+            - name: COFFERAK_SEAL
+              value: {{ $backend | quote }}
+            {{- if eq $backend "gcp-kms" }}
+            - name: COFFERAK_GCP_KMS_KEY
+              value: {{ .Values.seal.gcpKms.key | quote }}
+            {{- with .Values.seal.gcpKms.endpoint }}
+            - name: COFFERAK_GCP_KMS_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- else }}
+            - name: COFFERAK_HOST_KEY_FILE
+              value: "/var/lib/cofferak-keys/{host}.key"
+            {{- end }}
+            - name: COFFERAK_SESSION_IDLE_SECS
+              value: {{ .Values.session.idleSeconds | quote }}
+            - name: COFFERAK_SESSION_MAX_SECS
+              value: {{ .Values.session.maxSeconds | quote }}
+            {{- if .Values.tls.enabled }}
+            - name: COFFERAK_TLS_ADDR
+              value: "0.0.0.0:{{ .Values.tls.port }}"
+            - name: COFFERAK_TLS_CERT
+              value: /etc/cofferak/tls/tls.crt
+            - name: COFFERAK_TLS_KEY
+              value: /etc/cofferak/tls/tls.key
+            - name: COFFERAK_TLS_CLIENT_CA
+              value: /etc/cofferak/tls/ca.crt
+            - name: COFFERAK_TLS_BIND_SERVICE
+              value: {{ ternary "1" "0" .Values.tls.bindService | quote }}
+            - name: COFFERAK_TLS_MAX_CONNECTIONS
+              value: {{ .Values.tls.maxConnections | quote }}
+            {{- if .Values.tls.crl }}
+            - name: COFFERAK_TLS_CRL
+              value: /etc/cofferak/tls/crl.pem
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.tls.enabled }}
+          ports:
+            - name: mtls
+              containerPort: {{ .Values.tls.port }}
+              protocol: TCP
+          {{- end }}
+          # Ready once the vault is initialised and the daemon serves.
+          # `cofferak doctor` reads no secret and needs no token.
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/cofferak", "doctor"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cofferak
+            - name: run
+              mountPath: /run/cofferak
+            {{- if .Values.persistence.anchor.enabled }}
+            - name: anchor
+              mountPath: /var/lib/cofferak-anchor
+            {{- end }}
+            {{- if eq $backend "file" }}
+            - name: keys
+              mountPath: /var/lib/cofferak-keys
+            {{- end }}
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/cofferak/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: run
+          emptyDir:
+            medium: Memory
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}
+            # 0440, in decimal so every YAML parser reads the same number.
+            defaultMode: 288
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+    {{- if .Values.persistence.anchor.enabled }}
+    - metadata:
+        name: anchor
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.anchor.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.anchor.size }}
+    {{- end }}
+    {{- if eq $backend "file" }}
+    - metadata:
+        name: keys
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.seal.file.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.seal.file.size }}
+    {{- end }}

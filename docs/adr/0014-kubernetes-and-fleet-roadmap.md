@@ -86,8 +86,10 @@ updated docs, as every feature so far has.
 - **Done: unseal key without a TPM** ([ADR 0020](0020-runtime-seal-backends.md)),
   the first item of phase 1: a key file (a Kubernetes Secret) or Google
   Cloud KMS, chosen with `$COFFERAK_SEAL`.
-- Next: the container image, Helm chart and kind test of phase 1, then
-  workload authentication (phase 2).
+- **Done: container image, Helm chart and kind test**
+  ([ADR 0021](0021-container-image-and-helm-chart.md)), which completes
+  phase 1. Guide: [kubernetes.md](../kubernetes.md).
+- Next: workload authentication with ServiceAccount tokens (phase 2).
 
 ## Until then
 
