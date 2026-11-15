@@ -1,8 +1,9 @@
 # cofferak specification
 
 cofferak is a standalone, dependency-free secrets vault for any service on
-Linux or macOS. No external vault/KMS dependency (no HashiCorp Vault, no
-cloud KMS) - it is self-contained and meant to be dropped into another
+Linux or macOS. No external vault/KMS dependency by default (no HashiCorp
+Vault, no cloud KMS; a build with the `gcp-kms` feature can seal the host
+key with Google Cloud KMS, ADR 0020) - it is self-contained and meant to be dropped into another
 project with `git clone` into a `cofferak/` subdirectory, or run standalone.
 
 The contracts are `cofferak-core/src/{crypto,format,acl,seal}.rs`,
@@ -41,7 +42,9 @@ appear in `vault.cofferak`, `meta.json` and the audit log, only values
   --root`), the private half is printed once as an armored block and kept
   offline by the operator, never retained on any host.
 - **Per-host unseal key**: sealed via the platform `HostSeal` backend (ADR
-  0002) - `systemd-creds` (Linux) or Keychain (macOS).
+  0002) - `systemd-creds` (Linux) or Keychain (macOS). `$COFFERAK_SEAL`
+  chooses another backend at run time for hosts without one: a key file,
+  or Google Cloud KMS (ADR 0020).
 - **DEK** (256-bit): encrypts the vault's entries and service tokens with
   AES-256-GCM-SIV, each ciphertext's associated data binds it to its
   context (`cofferak/v2/entry\0<path>`, `.../service-token\0<id>`). Stored

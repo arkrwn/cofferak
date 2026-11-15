@@ -121,6 +121,7 @@ nav:
           - "0017 Closing the known limits from ADR 0015 and ADR 0016": adr/0017-closing-the-known-limits.md
           - "0018 Backups, self-healing on deletion, and `cofferak doctor`": adr/0018-backup-self-heal-and-doctor.md
           - "0019 Protocol version 2: sessions, batch reads, base64": adr/0019-protocol-v2-sessions.md
+          - "0020 Seal backends chosen at run time: key file, Cloud KMS": adr/0020-runtime-seal-backends.md
   - Development:
       - development.md
       - Progress: PROGRESS.md

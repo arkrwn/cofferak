@@ -24,6 +24,10 @@ exactly one enrolled host.
 | `COFFERAK_DATA_DIR` | Directory holding `vault.cofferak`, `hosts/<id>.seal` and `audit.jsonl` | `/var/lib/cofferak` | `~/Library/Application Support/cofferak` |
 | `COFFERAK_SOCKET` | Path of the Unix socket the daemon listens on | `/run/cofferak/cofferakd.sock` | `~/Library/Application Support/cofferak/cofferakd.sock` |
 | `COFFERAK_HOST_ID` | Which enrolled host this process runs as | - (required if more than one host is enrolled) | - (same) |
+| `COFFERAK_SEAL` | Where this host's unseal key lives: `platform`, `file` or `gcp-kms` ([below](#containers-and-other-hosts-without-a-tpm-or-keychain)). Set it the same for the daemon and for admin commands | `platform` (`systemd-creds`) | `platform` (Keychain) |
+| `COFFERAK_HOST_KEY_FILE` | With `COFFERAK_SEAL=file`: path of the key file, `{host}` stands for the host id | - | - |
+| `COFFERAK_GCP_KMS_KEY` | With `COFFERAK_SEAL=gcp-kms`: `projects/<project>/locations/<location>/keyRings/<ring>/cryptoKeys/<key>` | - | - |
+| `COFFERAK_GCP_KMS_ENDPOINT` | Optional private endpoint for Cloud KMS, `https` only | `https://cloudkms.googleapis.com` | same |
 | `COFFERAK_TLS_ADDR`, `COFFERAK_TLS_CERT`, `COFFERAK_TLS_KEY`, `COFFERAK_TLS_CLIENT_CA` | Server mode (ADR 0008/0011), off unless `COFFERAK_TLS_ADDR` is set, and then all four are required (mutual TLS is mandatory) | - | - |
 | `COFFERAK_TLS_MAX_CONNECTIONS` | Cap on concurrent TLS connections, extra connections are closed | `256` | `256` |
 | `COFFERAK_SESSION_IDLE_SECS` | Seconds an authenticated session (protocol version 2) may stay idle before the daemon closes it | `300` | `300` |
@@ -240,6 +244,76 @@ launchctl bootout gui/$(id -u)/com.cofferak.cofferakd
 **Socket path length:** Unix socket paths are limited to about 104
 characters on macOS (108 on Linux). Keep `COFFERAK_SOCKET` short, the
 default above is fine for normal account names.
+
+## Containers and other hosts without a TPM or Keychain
+
+A container has no `systemd-creds` and no Keychain. Choose where the
+host's unseal key lives with `COFFERAK_SEAL`
+([ADR 0020](adr/0020-runtime-seal-backends.md)). Set the same variables
+for `cofferakd` and for the admin commands (`init --host`, `enroll-host`,
+`enroll-service`, ...), they find the key the same way.
+
+### Google Cloud KMS (recommended on GCP)
+
+The host key is encrypted by a Cloud KMS key. Nothing stored with the
+vault can open it, who may unseal is decided by IAM, and every unseal is
+in Cloud Audit Logs. KMS is called once when the daemon starts, never
+when a secret is read.
+
+Build with the feature (it is off by default, a plain build has no HTTP
+client):
+
+```bash
+cargo build --release --features gcp-kms -p cofferak-cli -p cofferakd
+```
+
+Create a key and let the daemon's service account use it:
+
+```bash
+gcloud kms keyrings create cofferak --location global
+gcloud kms keys create host-key --keyring cofferak --location global --purpose encryption
+gcloud kms keys add-iam-policy-binding host-key --keyring cofferak --location global \
+  --member "serviceAccount:YOUR_SERVICE_ACCOUNT_EMAIL" \
+  --role roles/cloudkms.cryptoKeyEncrypterDecrypter
+```
+
+Then, for the admin commands and the daemon alike:
+
+```bash
+export COFFERAK_SEAL=gcp-kms
+export COFFERAK_GCP_KMS_KEY=projects/YOUR_PROJECT/locations/global/keyRings/cofferak/cryptoKeys/host-key
+cofferak init --root
+cofferak init --host pod-a
+cofferakd
+```
+
+The identity is the service account of the machine or pod, taken from
+the metadata server (on GKE, Workload Identity). On a machine without
+one, such as your laptop, `gcloud auth print-access-token` is used, so
+`init --host` works from an authenticated `gcloud`.
+
+This path is tested against a stand-in for Cloud KMS, not against Google
+itself. Run `init --host` and start the daemon once against your real key
+before you rely on it.
+
+### A key file
+
+```bash
+export COFFERAK_SEAL=file
+export COFFERAK_HOST_KEY_FILE=/etc/cofferak/keys/{host}.key
+cofferak init --root
+cofferak init --host pod-a      # writes /etc/cofferak/keys/pod-a.key, mode 0600
+cofferakd
+```
+
+The file is the raw key, **not encrypted**. It is as safe as the place
+it lives in: for a Kubernetes Secret, that is etcd encryption and RBAC.
+Anyone who can read both the key file and `vault.cofferak` can open the
+vault. Keep them on different volumes, and prefer a KMS where you have
+one. `init --host` never overwrites an existing key file.
+
+Either way, the daemon stops at startup with the reason if the key
+cannot be obtained. It never falls back to another backend.
 
 ## Socket permissions
 

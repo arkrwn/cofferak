@@ -139,8 +139,10 @@ fn credential_name(host_id: &str) -> String {
     format!("cofferak-{host_id}")
 }
 
-/// Obtain this host's unseal key (ADR 0009).
+/// Obtain this host's unseal key (ADR 0009, ADR 0020).
 ///
+/// 0. **A backend chosen with `$COFFERAK_SEAL`** (`file`, `gcp-kms`):
+///    unseal `hosts/<host_id>.seal` through it, and nothing else.
 /// 1. **Production (systemd):** if `$CREDENTIALS_DIRECTORY` contains
 ///    `cofferak-<host_id>`, read it. systemd decrypted it *as root* from the
 ///    sealed blob named in `LoadCredentialEncrypted=` and placed the
@@ -151,7 +153,26 @@ fn credential_name(host_id: &str) -> String {
 ///    platform `HostSeal` (Keychain on macOS, on Linux this shells out to
 ///    `systemd-creds decrypt`, which requires root for host-scope
 ///    credentials - so on Linux this path is for manual/root use only).
-fn load_host_key(host_id: &str, data_dir: &Path) -> Result<KeyBytes, String> {
+pub fn load_host_key(host_id: &str, data_dir: &Path) -> Result<KeyBytes, String> {
+    // A backend chosen with $COFFERAK_SEAL (ADR 0020) is the only source
+    // of the key: no fallback to another one, so a misconfiguration is an
+    // error at startup, never a silent change of where the key comes from.
+    if let Some(seal) = cofferak_core::seal::configured_seal(host_id)
+        .map_err(|e| format!("failed to unseal this host's key: {e}"))?
+    {
+        let sealed_path = data_dir.join("hosts").join(format!("{host_id}.seal"));
+        let sealed_bytes = std::fs::read(&sealed_path).map_err(|e| {
+            format!(
+                "could not read sealed host key at {}: {e}",
+                sealed_path.display()
+            )
+        })?;
+        return seal
+            .unseal(&SealedBlob(sealed_bytes))
+            .map(KeyBytes::new)
+            .map_err(|e| format!("failed to unseal this host's key: {e}"));
+    }
+
     if let Some(dir) = std::env::var_os("CREDENTIALS_DIRECTORY") {
         let cred_path = PathBuf::from(dir).join(credential_name(host_id));
         if cred_path.exists() {

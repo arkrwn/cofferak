@@ -1,6 +1,6 @@
 # ADR 0003: No external vault/KMS dependency
 
-Status: accepted
+Status: accepted, amended by [ADR 0020](0020-runtime-seal-backends.md)
 
 ## Decision
 
@@ -19,3 +19,12 @@ dynamic secrets, multi-region replication) for zero external
 dependencies and a minimal trust boundary: anyone who can read this
 repo's code can audit everything the vault does, with nothing to
 configure or trust beyond the local OS.
+
+## Amendment (ADR 0020)
+
+This holds for the default build and the default configuration. A build
+with the `gcp-kms` feature, started with `COFFERAK_SEAL=gcp-kms`, asks
+Google Cloud KMS to unwrap the host's 32-byte unseal key once at startup,
+so that the daemon can run where the operating system has nothing to seal
+a key with (a container). KMS never sees a secret or the data encryption
+key, and it is not on the request path.

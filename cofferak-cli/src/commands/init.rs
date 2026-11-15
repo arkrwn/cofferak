@@ -200,9 +200,21 @@ pub(crate) fn random_key() -> [u8; 32] {
 // exercises `run_init_root`/`run_init_host_with_seal`/`CliError` and
 // never references `current_host_seal`/`run_init_host` - those two are
 // used by the real `cofferak-cli` binary's `main.rs`.
-#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 pub fn current_host_seal(host_id: &str) -> Box<dyn HostSeal> {
+    // A backend chosen with $COFFERAK_SEAL (ADR 0020) comes first, through
+    // the same function the daemon uses. A configuration error is reported
+    // when the key is first needed, with the reason.
+    match cofferak_core::seal::configured_seal(host_id) {
+        Ok(Some(seal)) => seal,
+        Ok(None) => platform_host_seal(host_id),
+        Err(e) => Box::new(cofferak_core::seal::FailingSeal(e.to_string())),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn platform_host_seal(host_id: &str) -> Box<dyn HostSeal> {
     Box::new(SystemdCredsSeal {
         name: format!("cofferak-{host_id}"),
     })
@@ -210,7 +222,7 @@ pub fn current_host_seal(host_id: &str) -> Box<dyn HostSeal> {
 
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
-pub fn current_host_seal(host_id: &str) -> Box<dyn HostSeal> {
+fn platform_host_seal(host_id: &str) -> Box<dyn HostSeal> {
     Box::new(crate::presence::PresenceGatedSeal {
         inner: KeychainSeal {
             service: "cofferak".to_string(),
