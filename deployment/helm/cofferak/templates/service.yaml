@@ -1,0 +1,21 @@
+{{- if .Values.tls.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cofferak.fullname" . }}
+  labels:
+    {{- include "cofferak.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "cofferak.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: mtls
+      port: {{ .Values.tls.port }}
+      targetPort: mtls
+      protocol: TCP
+{{- end }}

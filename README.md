@@ -144,6 +144,7 @@ permanent install (systemd unit, launchd agent) see
 | [SDKs](docs/sdks.md) | Rust, Go, Python, TypeScript and JavaScript |
 | [Server mode](docs/server-mode.md) | Remote access over TLS 1.3 with mutual TLS |
 | [Deployment](docs/deployment.md) | systemd and launchd, environment variables |
+| [Kubernetes](docs/kubernetes.md) | Image and Helm chart, Cloud KMS, mutual TLS |
 | [Backup](docs/backup.md) | Backups, health checks, restore |
 | [Migration](docs/migration.md) | From `.env`, HashiCorp Vault, or between machines |
 | [Security](docs/key-security.md) | Protecting the root key, [recovery runbook](docs/recovery-runbook.md), [comparison](docs/comparison.md) |

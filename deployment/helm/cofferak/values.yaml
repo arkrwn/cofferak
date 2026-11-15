@@ -1,0 +1,88 @@
+# cofferak Helm chart values. See docs/kubernetes.md.
+
+image:
+  repository: ghcr.io/arkrwn/cofferak
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The id this pod is enrolled as (`cofferak init --host <id>`).
+# Defaults to the release's full name.
+hostId: ""
+
+# Where the host's unseal key lives (ADR 0020).
+seal:
+  # gcp-kms: sealed by Google Cloud KMS, unsealed with the pod's own
+  #          service account (Workload Identity). Recommended.
+  # file:    the raw key in a file on its own volume. NOT encrypted: it is
+  #          as safe as that volume. For development clusters.
+  backend: gcp-kms
+  gcpKms:
+    # projects/<project>/locations/<location>/keyRings/<ring>/cryptoKeys/<key>
+    key: ""
+    # Optional private endpoint for Cloud KMS (https).
+    endpoint: ""
+  file:
+    size: 16Mi
+    storageClass: ""
+
+serviceAccount:
+  create: true
+  # Defaults to the release's full name.
+  name: ""
+  # For Workload Identity on GKE:
+  #   iam.gke.io/gcp-service-account: NAME@PROJECT.iam.gserviceaccount.com
+  annotations: {}
+
+persistence:
+  # vault.cofferak, the sealed host key and the audit log.
+  size: 1Gi
+  storageClass: ""
+  # A second copy of the rollback anchor on its own volume (ADR 0017), so
+  # restoring an old snapshot of the data volume alone is detected.
+  anchor:
+    enabled: true
+    size: 16Mi
+    storageClass: ""
+
+# Server mode: TLS 1.3 with mandatory mutual TLS (ADR 0008, ADR 0011).
+# Without it the vault is reachable only inside the pod, over its Unix
+# socket (`kubectl exec`).
+tls:
+  enabled: false
+  # A Secret with tls.crt and tls.key (the server certificate), ca.crt
+  # (the CA that signs client certificates) and optionally crl.pem.
+  existingSecret: ""
+  port: 8443
+  # A token works only with a client certificate named after its service.
+  bindService: true
+  maxConnections: 256
+  # Set if the Secret has a crl.pem.
+  crl: false
+
+service:
+  type: ClusterIP
+  annotations: {}
+
+# Session time limits in seconds (ADR 0019).
+session:
+  idleSeconds: 300
+  maxSeconds: 3600
+
+# Extra environment variables for the container.
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 256Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,26 @@
+cofferak is starting and waits for you to initialise the vault.
+
+1. Create the vault. This prints the root private key ONCE: save the whole
+   block offline, it is your recovery key.
+
+   kubectl exec -it -n {{ .Release.Namespace }} {{ include "cofferak.fullname" . }}-0 -- cofferak init --root
+
+2. Enroll this pod as a host:
+
+   kubectl exec -n {{ .Release.Namespace }} {{ include "cofferak.fullname" . }}-0 -- cofferak init --host {{ include "cofferak.hostId" . }}
+
+3. Give a service its own token (printed once):
+
+   kubectl exec -n {{ .Release.Namespace }} {{ include "cofferak.fullname" . }}-0 -- cofferak enroll-service myapp --paths myapp --perm rw
+
+The pod becomes Ready after step 2.
+{{- if .Values.tls.enabled }}
+Services connect to {{ include "cofferak.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.tls.port }} with mutual TLS.
+{{- else }}
+Server mode is off (tls.enabled=false): the vault is reachable only inside the pod.
+{{- end }}
+{{- if eq .Values.seal.backend "file" }}
+
+WARNING: seal.backend=file keeps the host key unencrypted on a volume.
+Use seal.backend=gcp-kms outside development clusters.
+{{- end }}
