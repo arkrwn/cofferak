@@ -66,3 +66,15 @@ pass (no public root store). Proven by
 [`sdk/rust/cofferak-sdk/examples/smoke_tls.rs`](https://github.com/arkrwn/cofferak/blob/main/sdk/rust/cofferak-sdk/examples/smoke_tls.rs),
 run by `scripts/server-mode-smoke.sh`, which also asserts the negotiated
 parameters shown above.
+
+## Sessions
+
+For a service, open a session: one authenticated connection for every
+call, and many secrets in one round trip. It works the same over the Unix
+socket and over mutual TLS. See [Sessions](../sdks.md#sessions).
+
+```rust
+let mut s = client.session(&token)?;
+let password = s.get("myapp/DB_PASSWORD")?;
+let config = s.get_all("myapp")?; // BTreeMap<String, Vec<u8>>, everything under a prefix
+```

@@ -24,10 +24,18 @@ Server mode::
         server_name="cofferak.example.internal",
         ca_cert_path="/path/to/ca.pem",
     )
+
+Sessions (protocol version 2): authenticate once, keep one connection, and
+read many values in one round trip::
+
+    with client.session("my-token") as s:
+        password = s.get("myapp/DB_PASSWORD")
+        config = s.get_all("myapp")          # {path: value} for a prefix
 """
 
 from __future__ import annotations
 
+import base64 as _base64
 import json
 import socket as _socket
 import ssl as _ssl
@@ -43,6 +51,10 @@ _MAX_LINE_BYTES = 16 * 1024 * 1024
 # malicious daemon otherwise ties up the caller indefinitely. Matches
 # cofferakd's own per-connection timeout (ADR 0008).
 _IO_TIMEOUT_SECONDS = 30.0
+
+# Mirrors cofferakd's protocol::MAX_BATCH_PATHS: the most paths one
+# GetMany request may carry. Session.get_many splits longer lists.
+_MAX_BATCH_PATHS = 256
 
 
 class CofferakError(Exception):
@@ -143,29 +155,47 @@ class Client:
         instance._tls_context = context
         return instance
 
-    def _send(self, request: dict[str, Any]) -> Any:
-        payload = (json.dumps(request) + "\n").encode("utf-8")
+    def _open(self) -> Any:
+        """Open one connection to the daemon: a connected Unix socket, or
+        a TLS socket whose handshake has completed."""
         if self.socket_path is not None:
-            with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            try:
                 sock.settimeout(_IO_TIMEOUT_SECONDS)
                 sock.connect(self.socket_path)
-                sock.sendall(payload)
-                buf = self._read_line_bounded(sock)
-        else:
-            assert self._tls_addr is not None and self._tls_context is not None
-            with _socket.create_connection(
-                self._tls_addr, timeout=_IO_TIMEOUT_SECONDS
-            ) as raw_sock:
-                with self._tls_context.wrap_socket(
-                    raw_sock, server_hostname=self._tls_server_name
-                ) as tls_sock:
-                    tls_sock.settimeout(_IO_TIMEOUT_SECONDS)
-                    tls_sock.sendall(payload)
-                    buf = self._read_line_bounded(tls_sock)
+            except BaseException:
+                sock.close()
+                raise
+            return sock
+        assert self._tls_addr is not None and self._tls_context is not None
+        raw_sock = _socket.create_connection(self._tls_addr, timeout=_IO_TIMEOUT_SECONDS)
+        try:
+            tls_sock = self._tls_context.wrap_socket(
+                raw_sock, server_hostname=self._tls_server_name
+            )
+        except BaseException:
+            raw_sock.close()
+            raise
+        tls_sock.settimeout(_IO_TIMEOUT_SECONDS)
+        return tls_sock
+
+    def _send(self, request: dict[str, Any]) -> Any:
+        payload = (json.dumps(request) + "\n").encode("utf-8")
+        with self._open() as sock:
+            sock.sendall(payload)
+            buf = self._read_line_bounded(sock)
         try:
             return json.loads(buf.decode("utf-8"))
         except json.JSONDecodeError as e:
             raise ProtocolError(f"invalid JSON response: {e}") from e
+
+    def session(self, token: str) -> Session:
+        """Open a session (protocol version 2): authenticate once with
+        ``token``, then make any number of calls on one connection. Use it
+        as a context manager, or call ``close()`` when done. Raises
+        :class:`DeniedError` if the token is not accepted, and
+        :class:`ProtocolError` if the daemon is too old for sessions."""
+        return Session(self, token)
 
     @staticmethod
     def _read_line_bounded(sock: Any) -> bytes:
@@ -233,8 +263,176 @@ class Client:
         raise ProtocolError(f"unexpected response to List: {response!r}")
 
 
+class Session:
+    """An authenticated connection to cofferakd (protocol version 2).
+
+    One connection carries every call, so over TLS the handshake is paid
+    once instead of once per secret. If the daemon closes the connection
+    (it does after an idle period), the next call reconnects and
+    authenticates again without the caller noticing.
+
+    Not safe to share between threads without a lock: open one session
+    per thread.
+    """
+
+    def __init__(self, client: Client, token: str) -> None:
+        self._client = client
+        self._token = token
+        self._sock: Any = None
+        self._buf = b""
+        #: The service id the daemon knows this token as.
+        self.service: str = ""
+        self._connect()
+
+    def __enter__(self) -> Session:
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the connection. The session reconnects if used again."""
+        sock, self._sock, self._buf = self._sock, None, b""
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _connect(self) -> None:
+        self.close()
+        self._sock = self._client._open()
+        try:
+            hello = self._roundtrip({"Hello": {"version": 2}})
+            if not (isinstance(hello, dict) and "Hello" in hello):
+                raise ProtocolError(
+                    "this cofferakd does not support sessions (protocol version 2), "
+                    "upgrade it or use the per-call Client methods"
+                )
+            authed = self._roundtrip(
+                {"Auth": {"method": "token", "credential": self._token}}
+            )
+            if authed == "Denied":
+                raise DeniedError()
+            if isinstance(authed, dict) and "Err" in authed:
+                raise RemoteError(authed["Err"])
+            if not (isinstance(authed, dict) and "Authed" in authed):
+                raise ProtocolError(f"unexpected response to Auth: {authed!r}")
+            self.service = str(authed["Authed"].get("service", ""))
+        except BaseException:
+            self.close()
+            raise
+
+    def _roundtrip(self, request: Any) -> Any:
+        self._sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        while b"\n" not in self._buf:
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("cofferakd closed the connection")
+            if len(self._buf) + len(chunk) > _MAX_LINE_BYTES:
+                raise ProtocolError("response line exceeded the maximum allowed size")
+            self._buf += chunk
+        line, _, self._buf = self._buf.partition(b"\n")
+        try:
+            return json.loads(line.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ProtocolError(f"invalid JSON response: {e}") from e
+
+    def _call(self, request: Any, retry: bool = True) -> Any:
+        """Send one request. If the connection is gone, reconnect and send
+        it again once - except when ``retry`` is false (a request that must
+        not be repeated), where the connection error is raised."""
+        if self._sock is None:
+            self._connect()
+        try:
+            return self._roundtrip(request)
+        except OSError:
+            self.close()
+            if not retry:
+                raise
+        self._connect()
+        try:
+            return self._roundtrip(request)
+        except OSError:
+            self.close()
+            raise
+
+    @staticmethod
+    def _raise_for(response: Any, what: str) -> None:
+        if response == "Denied":
+            raise DeniedError()
+        if response == "NotFound":
+            raise NotFoundError()
+        if isinstance(response, dict) and "Err" in response:
+            raise RemoteError(response["Err"])
+        raise ProtocolError(f"unexpected response to {what}: {response!r}")
+
+    def get(self, path: str) -> bytes:
+        """Read a secret's value."""
+        response = self._call({"Get": {"path": path}})
+        if isinstance(response, dict) and "Value" in response:
+            return _base64.b64decode(response["Value"], validate=True)
+        self._raise_for(response, "Get")
+        raise AssertionError("unreachable")
+
+    def get_many(self, paths: list[str]) -> dict[str, bytes]:
+        """Read several secrets in one round trip. Returns ``{path:
+        value}`` for the paths that exist, a path with no value is left
+        out. Raises :class:`DeniedError` if any path is outside what the
+        token may read."""
+        out: dict[str, bytes] = {}
+        for start in range(0, len(paths), _MAX_BATCH_PATHS):
+            chunk = paths[start : start + _MAX_BATCH_PATHS]
+            response = self._call({"GetMany": {"paths": chunk}})
+            if not (isinstance(response, dict) and "Values" in response):
+                self._raise_for(response, "GetMany")
+            for item in response["Values"]:
+                error = item.get("error")
+                if error is None:
+                    out[item["path"]] = _base64.b64decode(item["value"], validate=True)
+                elif error == "denied":
+                    raise DeniedError()
+                elif error != "not_found":
+                    raise RemoteError(f"could not read {item['path']}")
+        return out
+
+    def get_all(self, prefix: str) -> dict[str, bytes]:
+        """Read every secret under ``prefix``: ``{path: value}``."""
+        return self.get_many(self.list(prefix))
+
+    def set(self, path: str, value: bytes) -> None:
+        """Write a secret's value. Requires a read-write token."""
+        encoded = _base64.b64encode(value).decode("ascii")
+        response = self._call({"Set": {"path": path, "value": encoded}})
+        if response != "Ok":
+            self._raise_for(response, "Set")
+
+    def rm(self, path: str) -> None:
+        """Remove a secret. Requires a read-write token."""
+        # Not repeated on a lost connection: a second try after a removal
+        # that did go through would wrongly report "not found".
+        response = self._call({"Rm": {"path": path}}, retry=False)
+        if response != "Ok":
+            self._raise_for(response, "Rm")
+
+    def list(self, prefix: str) -> list[str]:
+        """List secret paths under ``prefix``."""
+        response = self._call({"List": {"prefix": prefix}})
+        if isinstance(response, dict) and "Listed" in response:
+            return list(response["Listed"])
+        self._raise_for(response, "List")
+        raise AssertionError("unreachable")
+
+    def ping(self) -> None:
+        """Check that the daemon answers on this session."""
+        response = self._call("Ping")
+        if response != "Ok":
+            self._raise_for(response, "Ping")
+
+
 __all__ = [
     "Client",
+    "Session",
     "CofferakError",
     "DeniedError",
     "NotFoundError",

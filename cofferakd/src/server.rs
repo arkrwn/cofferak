@@ -15,7 +15,6 @@ use cofferak_core::seal::SystemdCredsSeal;
 
 use crate::audit::AuditLog;
 use crate::daemon::{load_tokens, Daemon};
-use crate::protocol::{decode_request, Response};
 
 /// Default data directory on Linux, used unless `$COFFERAK_DATA_DIR` is set.
 #[cfg(target_os = "linux")]
@@ -334,9 +333,6 @@ pub fn run() {
         let daemon = Arc::clone(&daemon);
         std::thread::spawn(move || {
             let _slot = slot;
-            let _deadline = stream.try_clone().ok().map(|s| {
-                crate::protocol::enforce_deadline(s, crate::protocol::CONNECTION_DEADLINE)
-            });
             let _ = stream.set_read_timeout(Some(crate::protocol::CONNECTION_DEADLINE));
             let _ = stream.set_write_timeout(Some(crate::protocol::CONNECTION_DEADLINE));
             handle_connection(stream, daemon);
@@ -345,15 +341,25 @@ pub fn run() {
 }
 
 /// Serve one client connection: read newline-delimited JSON requests,
-/// dispatch each through `Daemon::handle_request` under the shared mutex,
-/// and write back the newline-delimited JSON response.
-fn handle_connection(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) {
+/// run each through the connection's [`Session`](crate::session::Session)
+/// (protocol version 1 or 2, ADR 0019), and write back the response.
+///
+/// The connection has a hard deadline until it holds an authenticated
+/// version 2 session, from then on the session limits apply instead: an
+/// idle timeout between requests and a maximum lifetime.
+pub fn handle_connection(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) {
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
+    let mut deadline = stream
+        .try_clone()
+        .ok()
+        .map(|s| crate::protocol::enforce_deadline(s, crate::protocol::CONNECTION_DEADLINE));
     let mut reader = BufReader::new(read_half);
     let mut writer = stream;
     let mut line = Vec::new();
+    let mut session = crate::session::Session::new();
+    let mut in_session = false;
 
     loop {
         // Bounded, not `read_until`: an unbounded read lets a client
@@ -370,23 +376,27 @@ fn handle_connection(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) {
             continue;
         }
 
-        let response = match decode_request(&line) {
-            Ok(req) => daemon
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .handle_request(req),
-            Err(_) => Response::Err("malformed request".to_string()),
-        };
-
-        let mut out = crate::protocol::respond(response);
-        let sent = writer.write_all(&out);
-        zeroize::Zeroize::zeroize(&mut out);
+        let mut reply = session.handle_line(&line, &daemon, None);
+        let sent = writer.write_all(&reply.bytes);
+        zeroize::Zeroize::zeroize(&mut reply.bytes);
         zeroize::Zeroize::zeroize(&mut line);
-        if sent.is_err() {
+        if sent.is_err() || reply.close {
             break;
+        }
+
+        if session.is_authenticated() && !in_session {
+            in_session = true;
+            let limits = crate::session::SessionLimits::from_env();
+            // Dropping the old guard stands the short deadline down.
+            deadline = writer
+                .try_clone()
+                .ok()
+                .map(|s| crate::protocol::enforce_deadline(s, limits.lifetime));
+            let _ = writer.set_read_timeout(Some(limits.idle));
         }
     }
 
+    drop(deadline);
     let _ = writer.shutdown(Shutdown::Both);
 }
 

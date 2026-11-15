@@ -2,7 +2,8 @@
 
 A consuming service talks to `cofferakd` over its Unix socket - or, in
 [server mode](server-mode.md), TLS/mTLS over TCP - using the
-newline-delimited JSON protocol in [`docs/SPEC.md`](SPEC.md) §6.
+newline-delimited JSON protocol in [`docs/SPEC.md`](SPEC.md) §6, one
+request per connection or a [session](#sessions).
 Four client SDKs implement it today, **all four over both transports**
  - each is smoke-tested for real against a running daemon in CI
 (`scripts/sdk-smoke.sh` for the Unix socket, `scripts/server-mode-smoke.sh`
@@ -30,6 +31,61 @@ client = Client("/run/cofferak/cofferakd.sock")
 client.set("<token>", "myapp/DB_PASSWORD", b"s3cr3t")
 value = client.get("<token>", "myapp/DB_PASSWORD")
 ```
+
+## Sessions
+
+The calls above open a new connection each time and send the token with
+every request. That is fine for a script. A service should open a
+**session** instead (protocol version 2,
+[ADR 0019](adr/0019-protocol-v2-sessions.md)): it authenticates once,
+keeps one connection, and can read many secrets in one round trip. Over
+mutual TLS that is more than ten times faster, because the handshake is
+paid once ([benchmarks](benchmarks.md)).
+
+```python
+# Python
+with client.session("<token>") as s:
+    password = s.get("myapp/DB_PASSWORD")
+    config = s.get_all("myapp")              # {path: value} under a prefix
+    some = s.get_many(["myapp/A", "myapp/B"])
+```
+
+```go
+// Go
+s, err := client.Session(token)
+defer s.Close()
+password, err := s.Get("myapp/DB_PASSWORD")
+config, err := s.GetAll("myapp")             // map[string][]byte
+```
+
+```ts
+// TypeScript / JavaScript
+const s = await client.session(token);
+const password = await s.get("myapp/DB_PASSWORD");
+const config = await s.getAll("myapp");      // Map<string, Buffer>
+s.close();
+```
+
+```rust
+// Rust
+let mut s = client.session(&token)?;
+let password = s.get("myapp/DB_PASSWORD")?;
+let config = s.get_all("myapp")?;            // BTreeMap<String, Vec<u8>>
+```
+
+Every SDK's session has the same methods: `get`, `get_many`, `get_all`,
+`set`, `rm`, `list`, `ping` and `close`.
+
+- `get_many` and `get_all` return the values that exist. A path with no
+  value is left out, a path the token may not read is a "denied" error.
+- The daemon closes a session that has been idle for five minutes, or
+  open for an hour. The session reconnects and authenticates again on the
+  next call, you don't have to handle it.
+- A session never outlives its access: remove the service, and its open
+  sessions are denied on their next request.
+- Sessions need a `cofferakd` with protocol version 2. Against an older
+  daemon, opening one fails with a clear protocol error, and the per-call
+  methods keep working.
 
 None of these are published to a package registry yet - consume them via
 a local path/relative reference (see each SDK's own page above) until

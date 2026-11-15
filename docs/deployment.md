@@ -26,6 +26,8 @@ exactly one enrolled host.
 | `COFFERAK_HOST_ID` | Which enrolled host this process runs as | - (required if more than one host is enrolled) | - (same) |
 | `COFFERAK_TLS_ADDR`, `COFFERAK_TLS_CERT`, `COFFERAK_TLS_KEY`, `COFFERAK_TLS_CLIENT_CA` | Server mode (ADR 0008/0011), off unless `COFFERAK_TLS_ADDR` is set, and then all four are required (mutual TLS is mandatory) | - | - |
 | `COFFERAK_TLS_MAX_CONNECTIONS` | Cap on concurrent TLS connections, extra connections are closed | `256` | `256` |
+| `COFFERAK_SESSION_IDLE_SECS` | Seconds an authenticated session (protocol version 2) may stay idle before the daemon closes it | `300` | `300` |
+| `COFFERAK_SESSION_MAX_SECS` | Longest lifetime of one session, in seconds | `3600` | `3600` |
 | `COFFERAK_TLS_CRL` | PEM certificate revocation lists (comma separated). Revoked client certificates fail the handshake | none | none |
 | `COFFERAK_TLS_BIND_SERVICE` | `1`: a token is accepted only with a client certificate whose CN or DNS SAN is that token's service id. `0` turns this off | `1` | `1` |
 | `COFFERAK_ANCHOR_DIR` | Second copy of each host's rollback anchor, outside the data directory | `/var/lib/cofferak-anchor` (if it exists) | the Keychain |

@@ -36,6 +36,8 @@ COFFERAK_TLS_CLIENT_CA=./tls/ca.pem \
 | `COFFERAK_TLS_CERT` / `COFFERAK_TLS_KEY` | Server certificate + private key (PEM). Required once `COFFERAK_TLS_ADDR` is set. |
 | `COFFERAK_TLS_CLIENT_CA` | **Required.** CA (PEM) that signs every client certificate. The daemon refuses to start server mode without it. |
 | `COFFERAK_TLS_MAX_CONNECTIONS` | Optional. Maximum concurrent TLS connections (default `256`), connections beyond it are closed immediately. |
+| `COFFERAK_SESSION_IDLE_SECS` | Optional. Seconds an authenticated session may stay idle before it is closed (default `300`). |
+| `COFFERAK_SESSION_MAX_SECS` | Optional. Longest lifetime of one session in seconds (default `3600`). |
 | `COFFERAK_TLS_CRL` | Optional. PEM revocation lists (comma separated): revoked client certificates are refused. |
 | `COFFERAK_TLS_BIND_SERVICE` | Optional, default `1`: a token works only with a client certificate whose CN or DNS SAN is that token's service id. `0` turns it off. |
 

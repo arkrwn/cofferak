@@ -6,6 +6,9 @@
 //! Usage: `COFFERAK_SOCKET=/path/to.sock COFFERAK_TOKEN=<token> cargo run
 //! --example smoke -p cofferak-sdk -- <allowed-path> <denied-path>`
 
+#[path = "common/session_checks.rs"]
+mod session_checks;
+
 use cofferak_sdk::{Client, SdkError};
 
 fn main() {
@@ -36,6 +39,8 @@ fn main() {
         Err(SdkError::Denied) => {}
         other => panic!("expected Denied for a path outside the token's prefix, got {other:?}"),
     }
+
+    session_checks::session_checks(&client, &token, &allowed_path, &denied_path);
 
     println!("rust SDK smoke test passed");
 }

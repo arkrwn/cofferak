@@ -7,7 +7,11 @@
 //! TLS (server mode): additionally COFFERAK_TLS_ADDR, COFFERAK_TLS_SERVER_NAME,
 //! COFFERAK_TLS_CA, COFFERAK_TLS_CLIENT_CERT, COFFERAK_TLS_CLIENT_KEY.
 //!
-//! Usage: bench <path> <requests> [threads]
+//! Usage: bench <path> <requests> [threads] [session]
+//!
+//! With `session` as the fourth argument each thread opens one session
+//! (protocol version 2, ADR 0019) and sends every `get` on that one
+//! connection, instead of a fresh connection per request.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,6 +54,7 @@ fn main() {
         .unwrap_or_else(|| "bench/value".into());
     let requests: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10_000);
     let threads: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let session = args.get(3).is_some_and(|s| s == "session");
     let token = Arc::new(std::env::var("COFFERAK_TOKEN").expect("COFFERAK_TOKEN"));
 
     let (client, transport) = client_from_env();
@@ -65,9 +70,14 @@ fn main() {
             let (client, token, path) = (Arc::clone(&client), Arc::clone(&token), path.clone());
             std::thread::spawn(move || {
                 let mut lat = Vec::with_capacity(per_thread);
+                let mut open = session.then(|| client.session(&token).expect("session"));
                 for _ in 0..per_thread {
                     let t = Instant::now();
-                    std::hint::black_box(client.get(&token, &path).expect("get"));
+                    let value = match open.as_mut() {
+                        Some(s) => s.get(&path),
+                        None => client.get(&token, &path),
+                    };
+                    std::hint::black_box(value.expect("get"));
                     lat.push(t.elapsed());
                 }
                 lat
@@ -81,6 +91,16 @@ fn main() {
     let elapsed = start.elapsed();
     lat.sort();
 
+    let transport = if session {
+        transport.replace("new handshake per request", "one session per thread")
+            + if transport == "Unix socket" {
+                ", one session per thread"
+            } else {
+                ""
+            }
+    } else {
+        transport.to_string()
+    };
     println!(
         "get over {transport}, {threads} thread(s): {:>9.0} req/s  p50 {:>8.1} µs  p99 {:>8.1} µs  ({} requests)",
         lat.len() as f64 / elapsed.as_secs_f64(),

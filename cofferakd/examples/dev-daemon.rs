@@ -21,16 +21,14 @@
 //! reads, serving the same `daemon` over both transports at once.
 
 use std::collections::BTreeMap;
-use std::io::{BufReader, Write};
-use std::net::Shutdown;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::Write;
+use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 
 use cofferak_core::acl::{AccessToken, Permission};
 use cofferak_core::format::VaultFile;
 use cofferakd::audit::AuditLog;
 use cofferakd::daemon::Daemon;
-use cofferakd::protocol::{decode_request, encode, Response};
 
 fn env_required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
@@ -110,36 +108,8 @@ fn main() {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let daemon = Arc::clone(&daemon);
-        std::thread::spawn(move || handle_connection(stream, daemon));
+        // The real listener's connection handler, so this harness speaks
+        // exactly the protocol versions the real daemon does.
+        std::thread::spawn(move || cofferakd::server::handle_connection(stream, daemon));
     }
-}
-
-fn handle_connection(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) {
-    let Ok(read_half) = stream.try_clone() else {
-        return;
-    };
-    let mut reader = BufReader::new(read_half);
-    let mut writer = stream;
-    let mut line = Vec::new();
-
-    loop {
-        // Bounded, matching the real main.rs/tls_server.rs - see
-        // protocol::read_line_bounded's doc comment.
-        match cofferakd::protocol::read_line_bounded(&mut reader, &mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        if line.iter().all(|b| b.is_ascii_whitespace()) {
-            continue;
-        }
-        let response = match decode_request(&line) {
-            Ok(req) => daemon.lock().unwrap().handle_request(req),
-            Err(_) => Response::Err("malformed request".to_string()),
-        };
-        if writer.write_all(&encode(&response)).is_err() {
-            break;
-        }
-    }
-    let _ = writer.shutdown(Shutdown::Both);
 }

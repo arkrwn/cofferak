@@ -25,7 +25,6 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
 use crate::daemon::Daemon;
-use crate::protocol::{decode_request, Response};
 
 /// What `$COFFERAK_TLS_ADDR` and friends resolved to, if server mode is
 /// enabled. Returned by [`resolve`] so the caller can report a clear
@@ -234,11 +233,6 @@ pub fn start(config: TlsServerConfig, daemon: Arc<Mutex<Daemon>>) {
             let server_config = Arc::clone(&server_config);
             std::thread::spawn(move || {
                 let _slot = slot;
-                // A hard deadline covering the handshake and the request: a
-                // client trickling bytes can't hold a slot indefinitely.
-                let _deadline = tcp.try_clone().ok().map(|s| {
-                    crate::protocol::enforce_deadline(s, crate::protocol::CONNECTION_DEADLINE)
-                });
                 handle_tls_connection(tcp, server_config, daemon, bind_service);
             });
         }
@@ -310,8 +304,16 @@ fn handle_tls_connection(
     // never sends anything, or never reads the response, is dropped
     // rather than parked forever (a cheap mitigation for a
     // slowloris-style thread-exhaustion DoS against this listener).
-    let _ = tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)));
-    let _ = tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)));
+    let _ = tcp.set_read_timeout(Some(crate::protocol::CONNECTION_DEADLINE));
+    let _ = tcp.set_write_timeout(Some(crate::protocol::CONNECTION_DEADLINE));
+    // A hard deadline covering the handshake and the first requests: a
+    // client trickling bytes can't hold a slot indefinitely. Replaced by
+    // the session limits once a version 2 session is authenticated
+    // (ADR 0019).
+    let mut deadline = tcp
+        .try_clone()
+        .ok()
+        .map(|s| crate::protocol::enforce_deadline(s, crate::protocol::CONNECTION_DEADLINE));
 
     let conn = match ServerConnection::new(server_config) {
         Ok(conn) => conn,
@@ -328,6 +330,8 @@ fn handle_tls_connection(
     // `ServerConnection`, as TLS record state requires.
     let mut reader = BufReader::new(tls);
     let mut line = Vec::new();
+    let mut session = crate::session::Session::new();
+    let mut in_session = false;
     loop {
         // Bounded (`protocol::MAX_LINE_BYTES`), not `read_until`: this
         // listener is network-reachable, so an unbounded read is a real
@@ -356,27 +360,26 @@ fn handle_tls_connection(
         } else {
             None
         };
-        let response = match decode_request(&line) {
-            Ok(req) => {
-                let mut d = daemon
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                match &cert_names {
-                    Some(names) => d.handle_request_for_certificate(req, names),
-                    None => d.handle_request(req),
-                }
-            }
-            Err(_) => Response::Err("malformed request".to_string()),
-        };
-
-        let mut out = crate::protocol::respond(response);
-        let sent = reader.get_mut().write_all(&out);
-        zeroize::Zeroize::zeroize(&mut out);
+        let mut reply = session.handle_line(&line, &daemon, cert_names.as_deref());
+        let sent = reader.get_mut().write_all(&reply.bytes);
+        zeroize::Zeroize::zeroize(&mut reply.bytes);
         zeroize::Zeroize::zeroize(&mut line);
-        if sent.is_err() {
+        if sent.is_err() || reply.close {
             break;
         }
+
+        if session.is_authenticated() && !in_session {
+            in_session = true;
+            let limits = crate::session::SessionLimits::from_env();
+            let sock = &reader.get_ref().sock;
+            deadline = sock
+                .try_clone()
+                .ok()
+                .map(|s| crate::protocol::enforce_deadline(s, limits.lifetime));
+            let _ = sock.set_read_timeout(Some(limits.idle));
+        }
     }
+    drop(deadline);
 }
 
 /// The names a client certificate is issued to: its subject common names

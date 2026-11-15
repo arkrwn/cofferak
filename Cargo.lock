@@ -314,6 +314,7 @@ dependencies = [
 name = "cofferak-sdk"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -324,6 +325,7 @@ dependencies = [
 name = "cofferakd"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bincode",
  "cofferak-core",
  "libc",

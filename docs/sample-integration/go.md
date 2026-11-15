@@ -75,3 +75,19 @@ client cert, and rejecting a client cert
 signed by a different, untrusted CA - by
 [`sdk/go/cofferak/examples/smoke_tls/main.go`](https://github.com/arkrwn/cofferak/blob/main/sdk/go/cofferak/examples/smoke_tls/main.go),
 run by `scripts/server-mode-smoke.sh`.
+
+## Sessions
+
+For a service, open a session: one authenticated connection for every
+call, and many secrets in one round trip. It works the same over the Unix
+socket and over mutual TLS. See [Sessions](../sdks.md#sessions).
+
+```go
+s, err := client.Session(token)
+if err != nil {
+	log.Fatal(err)
+}
+defer s.Close()
+password, err := s.Get("myapp/DB_PASSWORD")
+config, err := s.GetAll("myapp") // map[string][]byte, everything under a prefix
+```

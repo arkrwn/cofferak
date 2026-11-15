@@ -11,6 +11,7 @@
 // path (not just the TypeScript source) actually works.
 
 const { Client, DeniedError } = require("../dist/index.js");
+const { sessionChecks } = require("./session_checks.js");
 
 async function main() {
   const socketPath = process.env.COFFERAK_SOCKET;
@@ -43,6 +44,8 @@ async function main() {
       process.exit(1);
     }
   }
+
+  await sessionChecks(client, token, allowedPath, deniedPath);
 
   console.log("javascript SDK smoke test passed");
 }

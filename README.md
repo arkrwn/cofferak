@@ -46,6 +46,8 @@ gets its own token, limited to the paths and permissions you grant it.
 - **Strong crypto:** CNSA 2.0 algorithms, a post-quantum recovery key,
   TLS 1.3 with mandatory mutual TLS for remote access.
 - **Fast:** reads in well under a millisecond, 0.24 µs to decrypt a value.
+  SDK sessions keep one authenticated connection and read many secrets in
+  one round trip, more than ten times faster over mutual TLS.
 - **Hard to misuse:** edits and rollbacks of the vault file are detected,
   tokens never go on the command line, admin commands on macOS need Touch
   ID, backups stay encrypted.

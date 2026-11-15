@@ -13,6 +13,7 @@ import (
 	"os"
 
 	cofferak "github.com/arkrwn/cofferak/sdk/go/cofferak"
+	"github.com/arkrwn/cofferak/sdk/go/cofferak/examples/sessioncheck"
 )
 
 func main() {
@@ -54,6 +55,11 @@ func main() {
 	var denied cofferak.DeniedError
 	if !errors.As(err, &denied) {
 		fmt.Fprintf(os.Stderr, "expected DeniedError for a path outside the token's prefix, got %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := sessioncheck.Run(client, token, allowedPath, deniedPath); err != nil {
+		fmt.Fprintln(os.Stderr, "session check failed:", err)
 		os.Exit(1)
 	}
 

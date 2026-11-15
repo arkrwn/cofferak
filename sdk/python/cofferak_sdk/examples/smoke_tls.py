@@ -19,6 +19,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from cofferak_sdk import Client, DeniedError  # noqa: E402
+from session_checks import session_checks  # noqa: E402
 
 
 def env_required(name: str) -> str:
@@ -58,6 +59,8 @@ def main() -> int:
         raise AssertionError("expected DeniedError for a path outside the token's prefix")
     except DeniedError:
         pass
+
+    session_checks(client, token, allowed_path, denied_path)
 
     print("python SDK TLS (server mode) smoke test passed")
     return 0

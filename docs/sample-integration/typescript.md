@@ -56,3 +56,16 @@ rejecting a connection with no client cert,
 and rejecting a client cert signed by a different, untrusted CA - by
 [`sdk/javascript/cofferak-sdk/examples/smoke_tls.js`](https://github.com/arkrwn/cofferak/blob/main/sdk/javascript/cofferak-sdk/examples/smoke_tls.js),
 run by `scripts/server-mode-smoke.sh`.
+
+## Sessions
+
+For a service, open a session: one authenticated connection for every
+call, and many secrets in one round trip. It works the same over the Unix
+socket and over mutual TLS. See [Sessions](../sdks.md#sessions).
+
+```ts
+const s = await client.session(token);
+const password = await s.get("myapp/DB_PASSWORD");
+const config = await s.getAll("myapp"); // Map<string, Buffer>, everything under a prefix
+s.close();
+```

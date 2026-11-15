@@ -309,6 +309,33 @@ impl Daemon {
         self.handle_request(req)
     }
 
+    /// Check a credential for a version 2 session (ADR 0019): the id of
+    /// the service the token belongs to, or `None`. With `cert_names`
+    /// (TLS with service binding, ADR 0017) the token must also belong to
+    /// the service the client certificate names. Every attempt is audited.
+    pub fn authenticate(&mut self, token: &str, cert_names: Option<&[String]>) -> Option<String> {
+        self.refresh_from_disk();
+        let Some(service) = self
+            .tokens
+            .get(&token_digest(token))
+            .map(|t| t.service_id.clone())
+        else {
+            self.log("unknown", "-", "auth", "denied");
+            return None;
+        };
+        if cert_names.is_some_and(|names| !names.contains(&service)) {
+            self.log(
+                &service,
+                "-",
+                "auth",
+                "denied: certificate is not for this service",
+            );
+            return None;
+        }
+        self.log(&service, "-", "auth", "ok");
+        Some(service)
+    }
+
     pub fn handle_request(&mut self, req: Request) -> Response {
         self.refresh_from_disk();
         match req {

@@ -19,6 +19,10 @@
 set -euo pipefail
 # Unattended run: hosts created here must not ask for Touch ID (macOS).
 export COFFERAK_NO_USER_PRESENCE=1
+# Sessions (protocol version 2, ADR 0019): the daemon closes a session that
+# is idle this long. Short here, so each SDK's session check can wait it
+# out and prove that the SDK reconnects on its own, over TLS too.
+export COFFERAK_SMOKE_IDLE_SECS=2
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
@@ -104,13 +108,17 @@ openssl x509 -req -sha384 -in "$WORKDIR/server.csr" \
 # The client certificate is named after the service its token belongs to:
 # the daemon only accepts a token together with its own service's
 # certificate (ADR 0017).
+# Signed with an extensions file so the certificate is X.509 version 3 on
+# every OpenSSL (without one, OpenSSL 3.0 writes a version 1 certificate,
+# which rustls refuses), as scripts/gen-certs.sh does.
+printf 'extendedKeyUsage=clientAuth\n' > "$WORKDIR/client.ext"
 make_client_cert() { # <name> <common-name>
   newkey "$WORKDIR/$1.key"
   openssl req -new -sha384 -key "$WORKDIR/$1.key" -subj "/CN=$2" \
     -out "$WORKDIR/$1.csr" 2>/dev/null
   openssl x509 -req -sha384 -in "$WORKDIR/$1.csr" \
     -CA "$WORKDIR/ca.pem" -CAkey "$WORKDIR/ca.key" -CAcreateserial \
-    -days 1 -out "$WORKDIR/$1.pem" 2>/dev/null
+    -days 1 -extfile "$WORKDIR/client.ext" -out "$WORKDIR/$1.pem" 2>/dev/null
 }
 make_client_cert client sdk-smoke-service
 make_client_cert other-client some-other-service
@@ -142,7 +150,7 @@ openssl req -new -sha384 -key "$WORKDIR/rogue-client.key" -subj "/CN=rogue-clien
   -out "$WORKDIR/rogue-client.csr" 2>/dev/null
 openssl x509 -req -sha384 -in "$WORKDIR/rogue-client.csr" \
   -CA "$WORKDIR/rogue-ca.pem" -CAkey "$WORKDIR/rogue-ca.key" -CAcreateserial \
-  -days 1 -out "$WORKDIR/rogue-client.pem" 2>/dev/null
+  -days 1 -extfile "$WORKDIR/client.ext" -out "$WORKDIR/rogue-client.pem" 2>/dev/null
 
 echo "== building workspace (release) =="
 cargo build --workspace --release --examples
@@ -188,6 +196,7 @@ COFFERAK_TLS_CERT="$WORKDIR/server.pem" \
 COFFERAK_TLS_KEY="$WORKDIR/server.key" \
 COFFERAK_TLS_CLIENT_CA="$WORKDIR/ca.pem" \
 COFFERAK_TLS_CRL="$WORKDIR/crl.pem" \
+COFFERAK_SESSION_IDLE_SECS="$COFFERAK_SMOKE_IDLE_SECS" \
   "$DEV_DAEMON" &
 DAEMON_PID=$!
 for _ in $(seq 1 50); do

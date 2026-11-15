@@ -18,11 +18,12 @@ the job log.
    hybrid X25519 + ML-KEM-1024 recovery wrap/unwrap (used only by `init`,
    `rotate-dek` and `recover`).
 2. **End-to-end reads** (`sdk/rust/cofferak-sdk/examples/bench.rs`): the
-   Rust SDK calling `get` against a running daemon, each call a full
-   request/response on a fresh connection (the SDKs' real behaviour), over
-   the Unix socket and over TLS 1.3 + mutual TLS, with 1 and 8 client
-   threads. Each `get` runs token lookup, the ACL check, decryption and
-   an audit-log append.
+   Rust SDK calling `get` against a running daemon, over the Unix socket
+   and over TLS 1.3 + mutual TLS, with 1 and 8 client threads. Measured
+   two ways: each call on a fresh connection (the per-call `Client`
+   methods), and every call of a thread on one session (protocol
+   version 2, [ADR 0019](adr/0019-protocol-v2-sessions.md)). Each `get`
+   runs token lookup, the ACL check, decryption and an audit-log append.
 
 The daemon is `cofferakd/examples/dev-daemon.rs`, which runs the same
 request path as `cofferakd` but skips host-key unsealing (a one-time
@@ -67,6 +68,25 @@ From the CI run of this change (`sdk-smoke (ubuntu-latest)` job, step
 | `get` over TLS 1.3 + mTLS, new ML-KEM-1024 handshake per request, 1 thread | 2,470 req/s | p50 402 µs, p99 469 µs |
 | `get` over TLS 1.3 + mTLS, new handshake per request, 8 threads | 5,680 req/s | p50 1.35 ms, p99 2.57 ms |
 
+## Sessions against a fresh connection per request
+
+Same machine, same run, same daemon: an Intel Xeon 2.10 GHz cloud VM
+(x86-64, Linux), release build, `./scripts/bench.sh 20000`, measured
+2026-11-15. The absolute numbers of a shared VM are modest, the ratio is
+the point.
+
+| `get`, Rust SDK | Fresh connection per request | One session per thread | Gain |
+|---|---|---|---|
+| Unix socket, 1 thread | 5,490 req/s, p50 168 µs | 19,400 req/s, p50 46 µs | 3.5× |
+| Unix socket, 8 threads | 4,570 req/s, p50 1.62 ms | 48,300 req/s, p50 130 µs | 10.6× |
+| TLS 1.3 + mTLS, 1 thread | 1,180 req/s, p50 817 µs | 16,100 req/s, p50 57 µs | 13.7× |
+| TLS 1.3 + mTLS, 8 threads | 2,770 req/s, p50 2.22 ms | 45,100 req/s, p50 134 µs | 16.3× |
+
+With a session, a read over post-quantum mutual TLS costs about the same
+as a read over the local Unix socket, because the handshake is paid once.
+`get_many` goes further for a service that loads its configuration at
+startup: any number of values up to 256 in one round trip.
+
 ## Reading the numbers
 
 - **The crypto is not the bottleneck.** Decrypting a typical secret takes
@@ -75,11 +95,12 @@ From the CI run of this change (`sdk-smoke (ubuntu-latest)` job, step
 - **Post-quantum security costs microseconds, once.** The ML-KEM-1024
   recovery wrap runs only during `init`, `rotate-dek` and `recover`, it
   is never on the request path.
-- **TLS numbers include a full handshake per request** (ML-KEM-1024
-  key exchange plus mutual certificate verification), because the SDKs
-  open a new connection for each call. They are an upper bound on cost.
-  Even so, a remote read completes in about half a millisecond on
-  localhost.
+- **The per-request TLS numbers include a full handshake each time**
+  (ML-KEM-1024 key exchange plus mutual certificate verification),
+  because the per-call `Client` methods open a new connection for each
+  call. They are an upper bound on cost. Even so, a remote read completes
+  in about half a millisecond on localhost. A session pays the handshake
+  once, see the table above.
 - **Concurrency:** the daemon serialises requests through one lock, so
   adding client threads raises throughput but also per-request latency.
   For a secrets store, where services read a handful of values at

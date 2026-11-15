@@ -61,6 +61,7 @@ from a command or test that was actually run. States: `todo`, `doing`,
 | Security hardening from the internal audit (ADR 0016) | done | symlink-safe root writes, `import --with-tokens`, `run --allow-env`, connection caps and deadlines, value cap, audit escaping, known limits listed in ADR 0016 |
 | Closing the known limits (ADR 0017) | done | macOS user presence, `--token-file`, memory wiping, TLS service binding and CRLs, replay protection, anchor mirror, proved by unit tests, server-mode-smoke and quickstart-check in CI |
 | Backups, self-heal and doctor (ADR 0018) | done | `cli_backup.rs`, daemon self-heal tests, quickstart-check step 9 in CI, systemd timer and launchd templates |
+| Protocol version 2: sessions, batch reads, base64 values (ADR 0019) | done | `cofferakd/tests/session_integration.rs` (17 tests) and `session_idle.rs` over a real socket and the listener's own connection handler; all four SDKs run the same session checks in `sdk-smoke.sh` and `server-mode-smoke.sh` (Unix socket and mutual TLS), including waiting out the idle timeout and reconnecting; version 1 still served |
 | Benchmarks | done | `scripts/bench.sh`, run in CI on every build, results in `docs/benchmarks.md` |
 
 ## Known gaps / open items
@@ -71,6 +72,10 @@ from a command or test that was actually run. States: `todo`, `doing`,
   internet-facing deployment, keep a firewall or a proxy with per-IP
   limits in front of `$COFFERAK_TLS_ADDR` (mTLS already rejects
   unauthenticated peers at the handshake).
+- **The daemon handles requests one at a time behind one lock.** With
+  sessions (ADR 0019) connection setup is no longer the cost of a read,
+  that lock is. Reads could share it.
+- **The CLI still speaks protocol version 1**, one request per process.
 - **`rotate-dek` needs a daemon restart.** Other admin changes
   (`enroll-service`, `import`, removing a service) are reloaded live
   (ADR 0012), after `rotate-dek` the running daemon keeps serving reads but

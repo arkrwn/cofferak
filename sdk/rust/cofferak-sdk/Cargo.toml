@@ -11,6 +11,7 @@ homepage.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 # Server mode (ADR 0008): optional TLS/TCP transport alongside the Unix
 # socket. Pure-Rust TLS, no OpenSSL/C dependency. No `tls12` feature -
 # see cofferakd/Cargo.toml's comment: both ends are our own code, so
