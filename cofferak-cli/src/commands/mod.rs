@@ -6,3 +6,4 @@ pub mod integrity;
 pub mod recover;
 pub mod secrets;
 pub mod transfer;
+pub mod workload;

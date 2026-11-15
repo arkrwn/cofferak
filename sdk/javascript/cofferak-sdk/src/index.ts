@@ -36,6 +36,15 @@
  * session.close();
  * ```
  *
+ * Workload identity (JWT): a session can authenticate with a workload's
+ * JWT instead of a token, for example a Kubernetes projected service
+ * account token. The token is read again on every connect and reconnect, so
+ * a rotated file is picked up when the old token has expired:
+ *
+ * ```ts
+ * const session = await client.sessionJwtFile("/var/run/secrets/cofferak/token");
+ * ```
+ *
  * The compiled `dist/index.js` (CommonJS) works the same way from plain
  * JavaScript - this is one package serving both runtimes.
  */
@@ -238,7 +247,26 @@ export class Client {
    * not accepted, and {@link ProtocolError} if the daemon is too old for
    * sessions. */
   session(token: string): Promise<Session> {
-    return Session.open(this, token);
+    return Session.open(this, { method: "token", get: () => token });
+  }
+
+  /** Open a session (protocol version 2) that authenticates with a
+   * workload's JWT (workload identity). `provider` is called on every
+   * connect and reconnect, so it can return a fresh token each time (the
+   * daemon closes the connection when the JWT expires, the next call then
+   * reconnects with whatever `provider` returns). Rejects with
+   * {@link DeniedError} if the daemon does not accept the JWT (the reason
+   * is only in the daemon's audit log). An error thrown by `provider` is
+   * passed on unchanged. */
+  sessionJwt(provider: () => string | Promise<string>): Promise<Session> {
+    return Session.open(this, { method: "jwt", get: provider });
+  }
+
+  /** Like {@link sessionJwt}, with the JWT read from the file `path`
+   * (content trimmed) on every connect and reconnect - a Kubernetes
+   * projected token file is rotated by the kubelet. */
+  sessionJwtFile(path: string): Promise<Session> {
+    return this.sessionJwt(async () => (await fs.promises.readFile(path, "utf8")).trim());
   }
 
   private send(request: unknown): Promise<WireResponse> {
@@ -353,6 +381,12 @@ export class Client {
  * answers by reconnecting. */
 class ConnectionLost extends Error {}
 
+/** Where a session gets its credential from on every (re)connect. */
+interface CredentialSource {
+  method: "token" | "jwt";
+  get: () => string | Promise<string>;
+}
+
 type SessionResponse =
   | { Hello: { version: number; features?: string[] } }
   | { Authed: { service: string } }
@@ -371,10 +405,12 @@ type SessionResponse =
  * once instead of once per secret. If the daemon closes the connection (it
  * does after an idle period), the next call reconnects and authenticates
  * again without the caller noticing. Calls made at the same time run one
- * after another. An idle session does not keep the Node.js process alive.
+ * after another. A session opened with a JWT asks its provider for the
+ * JWT again on every reconnect, so it survives the expiry of a short-lived
+ * workload token (the daemon closes the connection then). An idle session does not keep the Node.js process alive.
  */
 export class Session {
-  /** The service id the daemon knows this session's token as. */
+  /** The service id the daemon knows this session's token or JWT as. */
   service = "";
 
   private sock: net.Socket | null = null;
@@ -384,12 +420,12 @@ export class Session {
 
   private constructor(
     private readonly client: Client,
-    private readonly token: string
+    private readonly source: CredentialSource
   ) {}
 
-  /** Use {@link Client.session}. */
-  static async open(client: Client, token: string): Promise<Session> {
-    const session = new Session(client, token);
+  /** Use {@link Client.session}, {@link Client.sessionJwt} or {@link Client.sessionJwtFile}. */
+  static async open(client: Client, source: CredentialSource): Promise<Session> {
+    const session = new Session(client, source);
     await session.connect();
     return session;
   }
@@ -411,6 +447,9 @@ export class Session {
 
   private async connect(): Promise<void> {
     this.close();
+    // Ask for the credential first: an error from the provider propagates
+    // as it is, and no connection is opened for it.
+    const credential = await this.source.get();
     const sock = await this.client.openConnection();
     this.sock = sock;
     const lost = (err: Error) => {
@@ -441,7 +480,7 @@ export class Session {
         );
       }
       const authed = await this.roundtrip({
-        Auth: { method: "token", credential: this.token },
+        Auth: { method: this.source.method, credential },
       });
       if (typeof authed === "object" && "Authed" in authed) {
         this.service = authed.Authed.service;

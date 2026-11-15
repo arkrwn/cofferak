@@ -43,6 +43,7 @@ use std::path::PathBuf;
 use cofferak_core::acl::{path_allowed, AccessToken};
 use cofferak_core::crypto::{decrypt_entry, encrypt_entry, Aad, DekWrapHost, KeyBytes};
 use cofferak_core::format::{write_anchor, VaultEntry, VaultFile, VaultLock};
+use cofferak_core::workload::{Principal, WorkloadConfig};
 
 use crate::audit::{AuditEntry, AuditLog};
 use crate::protocol::{Request, Response};
@@ -152,8 +153,45 @@ pub struct Daemon {
     /// lookup compares fixed digests, never a client's guess against the
     /// real token string.
     tokens: BTreeMap<[u8; 32], AccessToken>,
+    /// Trusted token issuers and subject bindings (ADR 0022).
+    workload: WorkloadConfig,
     audit: AuditLog,
     persistence: Option<Persistence>,
+}
+
+/// Who a request is made as: a service's own token, or a workload whose
+/// identity token was verified when its session began (ADR 0022). An
+/// identity is checked again against the current configuration on every
+/// request, so removing a binding, an issuer or the service takes effect
+/// at once, and a token never works past its own expiry.
+#[derive(Debug, Clone, Copy)]
+pub enum Caller<'a> {
+    Token(&'a str),
+    Identity(&'a Principal),
+}
+
+/// Decrypt the workload identity configuration. Anything wrong with it
+/// (it does not decrypt, decode or validate) means no identity is
+/// accepted, never a partial configuration: a damaged one fails closed.
+pub fn load_workload(vault: &VaultFile, dek: &[u8; 32]) -> WorkloadConfig {
+    let Some(entry) = &vault.workload else {
+        return WorkloadConfig::default();
+    };
+    let config = decrypt_entry(dek, &Aad::workload(), entry)
+        .map(zeroize::Zeroizing::new)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| bincode::deserialize::<WorkloadConfig>(&bytes).map_err(|e| e.to_string()))
+        .and_then(|c| c.validate().map(|()| c));
+    match config {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "cofferakd: the workload identity configuration is unusable ({e}), \
+                 accepting no identity tokens"
+            );
+            WorkloadConfig::default()
+        }
+    }
 }
 
 /// SHA-256 of a wire token string: the daemon's internal token key.
@@ -181,10 +219,12 @@ impl Daemon {
         tokens: BTreeMap<String, AccessToken>,
         audit: AuditLog,
     ) -> Self {
+        let workload = load_workload(&vault, &dek);
         Daemon {
             dek: KeyBytes::new(dek),
             entries: vault.entries,
             tokens: token_index(tokens),
+            workload,
             audit,
             persistence: None,
         }
@@ -272,6 +312,7 @@ impl Daemon {
         p.generation_seen = p.generation_seen.max(disk.generation);
         p.last_good = bytes;
         self.tokens = token_index(load_tokens(&disk, &self.dek));
+        self.workload = load_workload(&disk, &self.dek);
         self.entries = disk.entries;
     }
 
@@ -339,10 +380,126 @@ impl Daemon {
     pub fn handle_request(&mut self, req: Request) -> Response {
         self.refresh_from_disk();
         match req {
-            Request::Get { token, path } => self.handle_get(&token, &path),
-            Request::Set { token, path, value } => self.handle_set(&token, &path, value),
-            Request::Rm { token, path } => self.handle_rm(&token, &path),
-            Request::List { token, prefix } => self.handle_list(&token, &prefix),
+            Request::Get { token, path } => self.handle_get(&Caller::Token(&token), &path),
+            Request::Set { token, path, value } => {
+                self.handle_set(&Caller::Token(&token), &path, value)
+            }
+            Request::Rm { token, path } => self.handle_rm(&Caller::Token(&token), &path),
+            Request::List { token, prefix } => self.handle_list(&Caller::Token(&token), &prefix),
+        }
+    }
+
+    /// Serve `req` for a workload that authenticated with an identity token
+    /// ([`authenticate_jwt`](Self::authenticate_jwt)). The request's own
+    /// `token` field is ignored. With `cert_names` (TLS with service
+    /// binding, ADR 0017) the client certificate must name the service the
+    /// identity acts as, the same rule as for a token.
+    pub fn handle_request_for_identity(
+        &mut self,
+        req: Request,
+        who: &Principal,
+        cert_names: Option<&[String]>,
+    ) -> Response {
+        self.refresh_from_disk();
+        let caller = Caller::Identity(who);
+        let (path, action) = match &req {
+            Request::Get { path, .. } => (path, "get"),
+            Request::Set { path, .. } => (path, "set"),
+            Request::Rm { path, .. } => (path, "rm"),
+            Request::List { prefix, .. } => (prefix, "list"),
+        };
+        if cert_names.is_some_and(|names| !names.contains(&who.service)) {
+            let path = path.clone();
+            self.log(
+                &who.service,
+                &path,
+                action,
+                "denied: certificate is not for this service",
+            );
+            return Response::Denied;
+        }
+        match req {
+            Request::Get { path, .. } => self.handle_get(&caller, &path),
+            Request::Set { path, value, .. } => self.handle_set(&caller, &path, value),
+            Request::Rm { path, .. } => self.handle_rm(&caller, &path),
+            Request::List { prefix, .. } => self.handle_list(&caller, &prefix),
+        }
+    }
+
+    /// Verify an identity token and find the service it acts as (ADR
+    /// 0022). The audit log records the outcome, with the subject only for
+    /// a token that verified, and the reason (never the token) for one
+    /// that did not. `Err` carries that reason.
+    pub fn authenticate_jwt(
+        &mut self,
+        jwt: &str,
+        cert_names: Option<&[String]>,
+    ) -> Result<Principal, &'static str> {
+        self.refresh_from_disk();
+        let principal = match self.workload.authenticate(jwt) {
+            Ok(p) => p,
+            Err(reject) => {
+                let reason = reject.reason();
+                self.log("unknown", "-", "auth", &format!("denied: {reason}"));
+                return Err(reason);
+            }
+        };
+        let subject = audit_safe(&principal.subject);
+        if !self
+            .tokens
+            .values()
+            .any(|t| t.service_id == principal.service)
+        {
+            self.log(
+                "unknown",
+                "-",
+                "auth",
+                &format!(
+                    "denied: bound service '{}' is not enrolled",
+                    principal.service
+                ),
+            );
+            return Err("bound service is not enrolled");
+        }
+        if cert_names.is_some_and(|names| !names.contains(&principal.service)) {
+            self.log(
+                &principal.service,
+                "-",
+                "auth",
+                "denied: certificate is not for this service",
+            );
+            return Err("certificate is not for this service");
+        }
+        self.log(
+            &principal.service,
+            "-",
+            "auth",
+            &format!("ok: jwt issuer {} subject {subject}", principal.issuer),
+        );
+        Ok(principal)
+    }
+
+    /// The access of `caller` right now, or `None`. A token is looked up by
+    /// its digest. An identity must still be bound (same binding, same
+    /// service), its service must still be enrolled, and its token must
+    /// not have expired.
+    fn resolve(&self, caller: &Caller<'_>) -> Option<AccessToken> {
+        match caller {
+            Caller::Token(token) => self.tokens.get(&token_digest(token)).cloned(),
+            Caller::Identity(who) => {
+                if now_unix() >= who.expires_at {
+                    return None;
+                }
+                let (binding_name, binding) =
+                    self.workload.binding_for(&who.issuer, &who.subject)?;
+                if binding_name != who.binding || binding.service != who.service {
+                    return None;
+                }
+                self.tokens
+                    .values()
+                    .find(|t| t.service_id == who.service)
+                    .cloned()
+            }
         }
     }
 
@@ -414,8 +571,8 @@ impl Daemon {
         let _ = self.audit.append(&entry);
     }
 
-    fn handle_get(&mut self, token: &str, path: &str) -> Response {
-        let tok = self.tokens.get(&token_digest(token)).cloned();
+    fn handle_get(&mut self, caller: &Caller<'_>, path: &str) -> Response {
+        let tok = self.resolve(caller);
         let Some(tok) = tok else {
             self.log("unknown", path, "get", "denied");
             return Response::Denied;
@@ -442,10 +599,10 @@ impl Daemon {
         }
     }
 
-    fn handle_set(&mut self, token: &str, path: &str, value: Vec<u8>) -> Response {
+    fn handle_set(&mut self, caller: &Caller<'_>, path: &str, value: Vec<u8>) -> Response {
         // Wiped when this function returns, whatever the outcome.
         let value = zeroize::Zeroizing::new(value);
-        let tok = self.tokens.get(&token_digest(token)).cloned();
+        let tok = self.resolve(caller);
         let Some(tok) = tok else {
             self.log("unknown", path, "set", "denied");
             return Response::Denied;
@@ -482,8 +639,8 @@ impl Daemon {
         Response::Ok
     }
 
-    fn handle_rm(&mut self, token: &str, path: &str) -> Response {
-        let tok = self.tokens.get(&token_digest(token)).cloned();
+    fn handle_rm(&mut self, caller: &Caller<'_>, path: &str) -> Response {
+        let tok = self.resolve(caller);
         let Some(tok) = tok else {
             self.log("unknown", path, "rm", "denied");
             return Response::Denied;
@@ -506,8 +663,8 @@ impl Daemon {
         Response::Ok
     }
 
-    fn handle_list(&mut self, token: &str, prefix: &str) -> Response {
-        let tok = self.tokens.get(&token_digest(token)).cloned();
+    fn handle_list(&mut self, caller: &Caller<'_>, prefix: &str) -> Response {
+        let tok = self.resolve(caller);
         let Some(tok) = tok else {
             self.log("unknown", prefix, "list", "denied");
             return Response::Denied;

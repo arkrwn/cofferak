@@ -36,7 +36,7 @@ fn now_unix() -> i64 {
 }
 
 /// Unseal `host_id`'s key with `seal` and unwrap the vault's DEK.
-fn unlock(
+pub(crate) fn unlock(
     data_dir: &Path,
     vault: &VaultFile,
     host_id: &str,
@@ -145,7 +145,7 @@ pub fn run_export_with_seal(
     Ok((sealed, report))
 }
 
-fn open_vault(
+pub(crate) fn open_vault(
     data_dir: &Path,
     host_id: &str,
     seal: &dyn HostSeal,
@@ -179,7 +179,7 @@ fn ensure_identity(
     Ok((id, true))
 }
 
-fn save_vault(
+pub(crate) fn save_vault(
     data_dir: &Path,
     host_id: &str,
     vault: &mut VaultFile,

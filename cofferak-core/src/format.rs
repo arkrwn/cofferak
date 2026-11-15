@@ -125,12 +125,41 @@ pub struct VaultFile {
     /// under the DEK (associated data `cofferak/v2/peer\0<name>`) so an
     /// attacker who can write the file can't add a peer.
     pub peers: BTreeMap<String, EncryptedEntry>,
+    /// Workload identity configuration (ADR 0022): the trusted token
+    /// issuers and the bindings from a workload's identity to a service,
+    /// one [`crate::workload::WorkloadConfig`] encrypted under the DEK with
+    /// associated data `cofferak/v2/workload`. `None` until the first
+    /// `cofferak identity add-issuer`.
+    pub workload: Option<EncryptedEntry>,
     /// Incremented on every sealed write, compared with this host's
     /// anchor to detect an older copy being put back (ADR 0015).
     pub generation: u64,
     /// HMAC-SHA384 over the whole vault (with this field empty), keyed from
     /// the DEK. Empty until the first sealed write.
     pub mac: Vec<u8>,
+    /// For a vault read from a format 4 file: the exact bytes its integrity
+    /// code was computed over (format 4 layout, `mac` empty), so the code
+    /// can still be verified after the in-memory upgrade. Never written,
+    /// cleared by [`seal`](Self::seal), which computes the format 5 code.
+    #[serde(skip)]
+    legacy_mac_input: Option<Vec<u8>>,
+}
+
+/// Vault format version 4 (before workload identities), read and upgraded
+/// in memory by [`VaultFile::load`]. Its integrity code still verifies.
+#[derive(Serialize, Deserialize)]
+struct VaultFileV4 {
+    version: u16,
+    created_at: i64,
+    root_pubkey: RootPublicKey,
+    root_wrap: Option<DekWrapRoot>,
+    hosts: BTreeMap<String, DekWrapHost>,
+    services: BTreeMap<String, EncryptedEntry>,
+    entries: BTreeMap<String, VaultEntry>,
+    identity: Option<EncryptedEntry>,
+    peers: BTreeMap<String, EncryptedEntry>,
+    generation: u64,
+    mac: Vec<u8>,
 }
 
 /// Vault format version 3 (before generation and integrity code).
@@ -174,8 +203,10 @@ impl VaultFile {
             entries: BTreeMap::new(),
             identity: None,
             peers: BTreeMap::new(),
+            workload: None,
             generation: 0,
             mac: Vec::new(),
+            legacy_mac_input: None,
         }
     }
 
@@ -201,6 +232,7 @@ impl VaultFile {
     pub fn seal(&mut self, dek: &[u8; 32]) {
         self.generation = self.generation.saturating_add(1);
         self.mac = Vec::new();
+        self.legacy_mac_input = None;
         let tag = aws_lc_rs::hmac::sign(&Self::mac_key(dek), &self.mac_input());
         self.mac = tag.as_ref().to_vec();
     }
@@ -217,10 +249,16 @@ impl VaultFile {
             if self.generation != 0 {
                 return Err(IntegrityError::Tampered);
             }
-        } else if aws_lc_rs::hmac::verify(&Self::mac_key(dek), &self.mac_input(), &self.mac)
-            .is_err()
-        {
-            return Err(IntegrityError::Tampered);
+        } else {
+            // A vault read from a format 4 file is checked over the bytes
+            // its code was made from, not over its format 5 re-encoding.
+            let input = match &self.legacy_mac_input {
+                Some(legacy) => legacy.clone(),
+                None => self.mac_input(),
+            };
+            if aws_lc_rs::hmac::verify(&Self::mac_key(dek), &input, &self.mac).is_err() {
+                return Err(IntegrityError::Tampered);
+            }
         }
         if let Some(seen) = anchor {
             if self.generation < seen {
@@ -274,6 +312,32 @@ impl VaultFile {
             VAULT_FORMAT_VERSION => bincode_options()
                 .deserialize(bytes)
                 .map_err(|_| FormatError::Corrupt),
+            4 => {
+                let mut v4: VaultFileV4 = bincode_options()
+                    .deserialize(bytes)
+                    .map_err(|_| FormatError::Corrupt)?;
+                // What the integrity code was computed over: this very
+                // vault, as format 4, with the code itself empty.
+                let mac = std::mem::take(&mut v4.mac);
+                let legacy = bincode_options()
+                    .serialize(&v4)
+                    .map_err(|_| FormatError::Corrupt)?;
+                Ok(VaultFile {
+                    version: VAULT_FORMAT_VERSION,
+                    created_at: v4.created_at,
+                    root_pubkey: v4.root_pubkey,
+                    root_wrap: v4.root_wrap,
+                    hosts: v4.hosts,
+                    services: v4.services,
+                    entries: v4.entries,
+                    identity: v4.identity,
+                    peers: v4.peers,
+                    workload: None,
+                    generation: v4.generation,
+                    legacy_mac_input: (!mac.is_empty()).then_some(legacy),
+                    mac,
+                })
+            }
             3 => {
                 let v3: VaultFileV3 = bincode_options()
                     .deserialize(bytes)
@@ -288,8 +352,10 @@ impl VaultFile {
                     entries: v3.entries,
                     identity: v3.identity,
                     peers: v3.peers,
+                    workload: None,
                     generation: 0,
                     mac: Vec::new(),
+                    legacy_mac_input: None,
                 })
             }
             // Format 2 has the same layout minus the identity/peers fields:
@@ -308,8 +374,10 @@ impl VaultFile {
                     entries: v2.entries,
                     identity: None,
                     peers: BTreeMap::new(),
+                    workload: None,
                     generation: 0,
                     mac: Vec::new(),
+                    legacy_mac_input: None,
                 })
             }
             other => Err(FormatError::UnsupportedVersion(other)),
@@ -321,9 +389,10 @@ impl VaultFile {
 /// crypto format v2 (ADR 0011): hybrid post-quantum root wrap and
 /// context-bound ciphertexts, version 3 adds the coffer identity and
 /// trusted peers (ADR 0013), version 4 adds the generation counter and
-/// whole-file integrity code (ADR 0015). Versions 2 and 3 are read and
+/// whole-file integrity code (ADR 0015), version 5 adds the workload
+/// identity configuration (ADR 0022). Versions 2, 3 and 4 are read and
 /// upgraded.
-pub const VAULT_FORMAT_VERSION: u16 = 4;
+pub const VAULT_FORMAT_VERSION: u16 = 5;
 
 /// Path of `host_id`'s anchor file: the newest vault generation this host
 /// has written or accepted (ADR 0015).
@@ -907,6 +976,82 @@ mod tests {
         assert_eq!((loaded.generation, loaded.mac.len()), (0, 0));
         assert_eq!(loaded.entries, v.entries);
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn sealed_v4_bytes(v: &VaultFile, dek: &[u8; 32], generation: u64) -> Vec<u8> {
+        let mut v4 = VaultFileV4 {
+            version: 4,
+            created_at: v.created_at,
+            root_pubkey: v.root_pubkey.clone(),
+            root_wrap: v.root_wrap.clone(),
+            hosts: v.hosts.clone(),
+            services: v.services.clone(),
+            entries: v.entries.clone(),
+            identity: v.identity.clone(),
+            peers: v.peers.clone(),
+            generation,
+            mac: Vec::new(),
+        };
+        let input = bincode_options().serialize(&v4).unwrap();
+        v4.mac = aws_lc_rs::hmac::sign(&VaultFile::mac_key(dek), &input)
+            .as_ref()
+            .to_vec();
+        bincode_options().serialize(&v4).unwrap()
+    }
+
+    #[test]
+    fn version_4_vaults_upgrade_and_their_integrity_code_still_verifies() {
+        let dek = [7u8; 32];
+        let v = sample_vault_with_root_wrap_some();
+        let bytes = sealed_v4_bytes(&v, &dek, 3);
+
+        let mut loaded = VaultFile::from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.version, VAULT_FORMAT_VERSION);
+        assert_eq!(loaded.generation, 3);
+        assert_eq!(loaded.workload, None);
+        assert_eq!(loaded.entries, v.entries);
+        loaded
+            .verify(&dek, Some(3))
+            .expect("the format 4 code must still verify after the upgrade");
+        assert!(
+            loaded.verify(&[8u8; 32], Some(3)).is_err(),
+            "a wrong DEK must not verify"
+        );
+        assert!(
+            matches!(
+                loaded.verify(&dek, Some(4)),
+                Err(IntegrityError::Rollback { .. })
+            ),
+            "rollback protection must survive the upgrade"
+        );
+
+        // The next write seals in format 5, and that verifies on its own.
+        loaded.seal(&dek);
+        assert_eq!(loaded.generation, 4);
+        let again = VaultFile::from_bytes(&loaded.to_bytes().unwrap()).unwrap();
+        assert_eq!(again.version, 5);
+        again.verify(&dek, Some(4)).unwrap();
+    }
+
+    #[test]
+    fn a_tampered_version_4_vault_is_refused_after_the_upgrade() {
+        let dek = [7u8; 32];
+        let mut v = sample_vault_with_root_wrap_some();
+        let bytes = sealed_v4_bytes(&v, &dek, 3);
+        // Change something the code covers, keep the old code.
+        v.created_at += 1;
+        let mut forged = bytes.clone();
+        let other = sealed_v4_bytes(&v, &dek, 3);
+        // Same layout and length: take the new body with the old code.
+        let mac_len = 48 + 8;
+        let body = forged.len() - mac_len;
+        forged[..body].copy_from_slice(&other[..body]);
+        let loaded = VaultFile::from_bytes(&forged).unwrap();
+        assert_eq!(loaded.created_at, v.created_at);
+        assert!(matches!(
+            loaded.verify(&dek, Some(3)),
+            Err(IntegrityError::Tampered)
+        ));
     }
 
     #[test]

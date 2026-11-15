@@ -58,11 +58,15 @@ appear in `vault.cofferak`, `meta.json` and the audit log, only values
 
 ## 3. On-disk format
 
-`vault.cofferak` (binary, `bincode`, format version 2, other versions are
-rejected with `UnsupportedVersion`): header, `root_pubkey: {x25519,
-mlkem1024}`, `hosts: BTreeMap<host_id,
+`vault.cofferak` (binary, `bincode`, format version 5, versions 2 to 4 are
+read and upgraded, others are rejected with `UnsupportedVersion`): header,
+`root_pubkey: {x25519, mlkem1024}`, `hosts: BTreeMap<host_id,
 DekWrapHost>`, `services: BTreeMap<service_id, EncryptedEntry>`,
-`entries: BTreeMap<path, VaultEntry>`, `root_wrap: Option<DekWrapRoot>`.
+`entries: BTreeMap<path, VaultEntry>`, `root_wrap: Option<DekWrapRoot>`,
+the coffer `identity` and trusted `peers` (ADR 0013), the `workload`
+identity configuration (an encrypted `WorkloadConfig`: trusted issuers and
+subject bindings, ADR 0022), and the `generation` counter and `mac`
+integrity code (ADR 0015).
 `meta.json` (non-secret, informational): version, root pubkey fingerprint,
 host/service IDs - safe to read without unsealing.
 
@@ -155,6 +159,15 @@ requests without a token (`cofferakd/src/protocol.rs`'s
 {"List":{"prefix":"a"}}                   → {"Listed":["a/b"]}
 "Ping"                                    → "Ok"
 ```
+
+`Auth` methods: `token` (the credential is a service's access token) and
+`jwt` (ADR 0022, the credential is an identity token: a Kubernetes
+ServiceAccount token, a CI OIDC token). A `jwt` login is verified offline
+against the issuer keys in the vault and acts as the service its subject is
+bound to. It is checked again on every request (binding, service,
+expiry), and the daemon closes the connection without an answer when the
+token expires. The client is only ever told `"Denied"`, the reason is in
+the audit log.
 
 Values are base64 (standard alphabet, padded). A batch item's `error` is
 `denied`, `not_found` or `error`. `GetMany` takes at most 256 paths and

@@ -53,6 +53,9 @@ gets its own token, limited to the paths and permissions you grant it.
   ID, backups stay encrypted.
 - **Easy to adopt:** import a `.env` file, run your app with
   `cofferak run`, or use the Rust, Go, Python and TypeScript SDKs.
+- **No secret to start with:** on Kubernetes or in CI, a workload signs in
+  with the identity token its platform gives it
+  ([workload identity](docs/workload-identity.md)).
 
 ## Quickstart
 
@@ -145,6 +148,7 @@ permanent install (systemd unit, launchd agent) see
 | [Server mode](docs/server-mode.md) | Remote access over TLS 1.3 with mutual TLS |
 | [Deployment](docs/deployment.md) | systemd and launchd, environment variables |
 | [Kubernetes](docs/kubernetes.md) | Image and Helm chart, Cloud KMS, mutual TLS |
+| [Workload identity](docs/workload-identity.md) | Sign in with a ServiceAccount or CI token instead of a static one |
 | [Backup](docs/backup.md) | Backups, health checks, restore |
 | [Migration](docs/migration.md) | From `.env`, HashiCorp Vault, or between machines |
 | [Security](docs/key-security.md) | Protecting the root key, [recovery runbook](docs/recovery-runbook.md), [comparison](docs/comparison.md) |

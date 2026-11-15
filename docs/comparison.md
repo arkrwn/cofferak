@@ -60,8 +60,10 @@ dynamic secrets or a policy language.
 auth methods, or you're already running it at scale and it's working.
 **For Kubernetes clusters, Vault is the right choice today:** cofferak
 now runs in a cluster as a single pod with a Helm chart and mutual TLS
-([guide](kubernetes.md)), but it has no ServiceAccount authentication, no
-pod injector/CSI driver, no replicas or HA and no independent audit yet.
+([guide](kubernetes.md)) and workloads can sign in with their
+ServiceAccount token ([workload identity](workload-identity.md)), but it
+has no pod injector/CSI driver, no replicas or HA and no independent audit
+yet.
 What it would take is laid out in
 [ADR 0014](adr/0014-kubernetes-and-fleet-roadmap.md). In the meantime,
 cofferak works well next to Vault on developer machines and CI, and can

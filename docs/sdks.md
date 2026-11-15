@@ -87,6 +87,27 @@ Every SDK's session has the same methods: `get`, `get_many`, `get_all`,
   daemon, opening one fails with a clear protocol error, and the per-call
   methods keep working.
 
+### Sessions with an identity token (no static token)
+
+A workload can open a session with the signed token its platform gave it
+instead of a service token ([workload identity](workload-identity.md)).
+Give the SDK the **file** (it is read again every time the SDK connects,
+so a Kubernetes projected token that the kubelet rotates needs no code) or
+a function that returns the token:
+
+| | From a file | From a function |
+|---|---|---|
+| Rust | `client.session_jwt_file(path)?` | `client.session_jwt(\|\| Ok(token))?` |
+| Go | `client.SessionJWTFile(path)` | `client.SessionJWT(func() (string, error) {...})` |
+| Python | `client.session_jwt_file(path)` | `client.session_jwt(lambda: token)` |
+| TypeScript | `await client.sessionJwtFile(path)` | `await client.sessionJwt(() => token)` |
+
+The session is the same as above, with the same methods. A token the
+daemon refuses is a "denied" error. When the token expires the daemon
+closes the session and the SDK reconnects with the then-current token on
+its next call. If the token was withdrawn (the binding removed) that
+reconnect is denied.
+
 None of these are published to a package registry yet - consume them via
 a local path/relative reference (see each SDK's own page above) until
 the wire protocol and SDK surface area are stable enough to commit to.
