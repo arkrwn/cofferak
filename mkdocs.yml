@@ -120,6 +120,7 @@ nav:
           - "0016 Security hardening after the internal audit": adr/0016-security-hardening-from-the-audit.md
           - "0017 Closing the known limits from ADR 0015 and ADR 0016": adr/0017-closing-the-known-limits.md
           - "0018 Backups, self-healing on deletion, and `cofferak doctor`": adr/0018-backup-self-heal-and-doctor.md
+          - "0019 Protocol version 2: sessions, batch reads, base64": adr/0019-protocol-v2-sessions.md
   - Development:
       - development.md
       - Progress: PROGRESS.md

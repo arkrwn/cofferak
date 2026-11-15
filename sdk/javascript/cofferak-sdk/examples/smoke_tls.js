@@ -13,6 +13,7 @@
 //   node examples/smoke_tls.js [allowed-path] [denied-path]
 
 const { Client, DeniedError } = require("../dist/index.js");
+const { sessionChecks } = require("./session_checks.js");
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -60,6 +61,8 @@ async function main() {
       process.exit(1);
     }
   }
+
+  await sessionChecks(client, token, allowedPath, deniedPath);
 
   console.log("javascript SDK TLS (server mode) smoke test passed");
 }

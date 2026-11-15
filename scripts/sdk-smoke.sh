@@ -51,6 +51,12 @@ KEYCHAIN_ITEM=""
 
 UNIT=""
 
+# Sessions (protocol version 2, ADR 0019): the daemon closes a session that
+# is idle this long. Short here, so each SDK's session check can wait it
+# out and prove that the SDK reconnects on its own.
+SESSION_IDLE_SECS=2
+export COFFERAK_SMOKE_IDLE_SECS="$SESSION_IDLE_SECS"
+
 cleanup() {
   if [[ -n "$UNIT" ]]; then
     sudo systemctl stop "$UNIT" 2>/dev/null || true
@@ -97,6 +103,7 @@ start_real_daemon() {
     --setenv=COFFERAK_DATA_DIR="$DATA_DIR" \
     --setenv=COFFERAK_SOCKET="$SOCKET" \
     --setenv=COFFERAK_HOST_ID="$HOST_ID" \
+    --setenv=COFFERAK_SESSION_IDLE_SECS="$SESSION_IDLE_SECS" \
     "$COFFERAKD"
   wait_for_socket
 }
@@ -110,6 +117,7 @@ cargo build --workspace --release
 start_mac_daemon() {
   rm -f "$SOCKET"
   COFFERAK_DATA_DIR="$DATA_DIR" COFFERAK_SOCKET="$SOCKET" COFFERAK_HOST_ID="$HOST_ID" \
+    COFFERAK_SESSION_IDLE_SECS="$SESSION_IDLE_SECS" \
     "$COFFERAK" daemon >"$WORKDIR/daemon.log" 2>&1 &
   DAEMON_PID=$!
   wait_for_socket || { cat "$WORKDIR/daemon.log" >&2; return 1; }
@@ -171,7 +179,8 @@ else
     cargo build --release --example dev-daemon -p cofferakd
   fi
   echo "== starting the dev-only in-memory daemon (see script header) =="
-  COFFERAK_SOCKET="$SOCKET" COFFERAK_TOKEN_SECRET_HEX="$TOKEN" COFFERAK_TOKEN_PREFIX="sdk-smoke" "$DEV_DAEMON" &
+  COFFERAK_SOCKET="$SOCKET" COFFERAK_TOKEN_SECRET_HEX="$TOKEN" COFFERAK_TOKEN_PREFIX="sdk-smoke" \
+    COFFERAK_SESSION_IDLE_SECS="$SESSION_IDLE_SECS" "$DEV_DAEMON" &
   DAEMON_PID=$!
   wait_for_socket
 fi

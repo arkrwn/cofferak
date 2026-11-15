@@ -133,6 +133,36 @@ already (Go's `encoding/json` base64-encodes `[]byte` by default, see
 SDK must convert explicitly too, not rely on its language's default
 byte-array JSON encoding.
 
+### Version 2: sessions (ADR 0019)
+
+The same listeners also speak version 2. A connection switches to it by
+sending `Hello` as its first line, authenticates once, and then sends
+requests without a token (`cofferakd/src/protocol.rs`'s
+`RequestV2`/`ResponseV2`, `cofferakd/src/session.rs`):
+
+```
+{"Hello":{"version":2}}                   → {"Hello":{"version":2,"features":["session","batch","base64"]}}
+{"Auth":{"method":"token","credential":"<hex>"}}
+                                          → {"Authed":{"service":"<id>"}} | "Denied"
+{"Get":{"path":"a/b"}}                    → {"Value":"<base64>"}
+{"GetMany":{"paths":["a/b","a/c"]}}       → {"Values":[{"path":"a/b","value":"<base64>"},
+                                                       {"path":"a/c","error":"not_found"}]}
+{"Set":{"path":"a/b","value":"<base64>"}} → "Ok"
+{"Rm":{"path":"a/b"}}                     → "Ok"
+{"List":{"prefix":"a"}}                   → {"Listed":["a/b"]}
+"Ping"                                    → "Ok"
+```
+
+Values are base64 (standard alphabet, padded). A batch item's `error` is
+`denied`, `not_found` or `error`. `GetMany` takes at most 256 paths and
+returns at most 4 MiB of values. The daemon checks the session's
+credential again on every request, so a session never outlives its
+access. Three wrong credentials close the connection. An authenticated
+session is closed after `$COFFERAK_SESSION_IDLE_SECS` (default 300)
+without a request and after `$COFFERAK_SESSION_MAX_SECS` (default 3600) in
+total, before authentication the 30 second connection deadline applies.
+An older daemon answers `Hello` with `{"Err":"malformed request"}`.
+
 ## 6a. Server mode (ADR 0008)
 
 Opt-in: `$COFFERAK_TLS_ADDR` plus `$COFFERAK_TLS_CERT`/`$COFFERAK_TLS_KEY`

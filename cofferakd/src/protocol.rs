@@ -38,6 +38,108 @@ pub enum Response {
     Err(String),
 }
 
+/// Newest protocol version this daemon speaks. Version 1 is the original
+/// one-token-per-request protocol above, version 2 (ADR 0019) is opened
+/// with [`RequestV2::Hello`] and keeps one authenticated session per
+/// connection.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// What a version 2 session can do, sent in the `Hello` reply so a client
+/// can check for a feature instead of guessing from the version number.
+pub const FEATURES: &[&str] = &["session", "batch", "base64"];
+
+/// Most paths one `GetMany` may ask for.
+pub const MAX_BATCH_PATHS: usize = 256;
+
+/// Most plaintext bytes one `GetMany` reply may carry. Base64 adds a
+/// third, so the reply stays well inside [`MAX_LINE_BYTES`].
+pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// A version 2 request (ADR 0019). A connection switches to version 2 by
+/// sending `Hello` as its first line, authenticates once with `Auth`, and
+/// then sends requests without a token. Values are base64 strings
+/// (standard alphabet, padded), not JSON number arrays.
+#[derive(Serialize, Deserialize, Clone)]
+pub enum RequestV2 {
+    Hello {
+        version: u32,
+    },
+    /// `method` names how the client proves who it is. `"token"` (a
+    /// service access token in `credential`) is the only method today, the
+    /// field exists so workload identities can be added without another
+    /// protocol version.
+    Auth {
+        method: String,
+        credential: String,
+    },
+    Get {
+        path: String,
+    },
+    GetMany {
+        paths: Vec<String>,
+    },
+    Set {
+        path: String,
+        value: String,
+    },
+    Rm {
+        path: String,
+    },
+    List {
+        prefix: String,
+    },
+    Ping,
+}
+
+/// One path's outcome in a [`ResponseV2::Values`] reply: `value` is the
+/// base64 value, or `error` is `"denied"`, `"not_found"` or `"error"`.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct BatchItem {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+}
+
+/// A version 2 response.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub enum ResponseV2 {
+    Hello { version: u32, features: Vec<String> },
+    Authed { service: String },
+    Value(String),
+    Values(Vec<BatchItem>),
+    Listed(Vec<String>),
+    Ok,
+    Denied,
+    NotFound,
+    Err(String),
+}
+
+/// Encode a version 2 `response` for the wire and wipe the values it
+/// carried. The caller wipes the returned bytes after sending them.
+pub fn respond_v2(response: ResponseV2) -> Vec<u8> {
+    use zeroize::Zeroize;
+    let out = encode(&response);
+    match response {
+        ResponseV2::Value(mut v) => v.zeroize(),
+        ResponseV2::Values(items) => {
+            for mut item in items {
+                if let Some(v) = item.value.as_mut() {
+                    v.zeroize();
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Parse a single version 2 request line.
+pub fn decode_request_v2(line: &[u8]) -> Result<RequestV2, serde_json::Error> {
+    serde_json::from_slice(line)
+}
+
 /// Serialize a message as one JSON line, terminated by `\n`.
 pub fn encode(msg: &impl Serialize) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(msg).expect("protocol messages always serialize");

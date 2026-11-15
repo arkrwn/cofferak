@@ -17,6 +17,18 @@
 //! let value = client.get("my-token", "myapp/DB_PASSWORD").unwrap();
 //! assert_eq!(value, b"s3cr3t");
 //! ```
+//!
+//! Sessions (protocol version 2): authenticate once, keep one connection,
+//! and read many values in one round trip.
+//!
+//! ```no_run
+//! use cofferak_sdk::Client;
+//!
+//! let client = Client::connect("/run/cofferak/cofferakd.sock");
+//! let mut session = client.session("my-token").unwrap();
+//! let password = session.get("myapp/DB_PASSWORD").unwrap();
+//! let config = session.get_all("myapp").unwrap(); // path -> value
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufReader, Write};
@@ -156,6 +168,7 @@ fn hardened_provider() -> rustls::crypto::CryptoProvider {
     }
 }
 
+#[derive(Clone)]
 enum Transport {
     Unix(PathBuf),
     Tls {
@@ -335,6 +348,21 @@ impl Client {
         Ok(Some(info))
     }
 
+    /// Open a session (protocol version 2): authenticate once with
+    /// `token`, then make any number of calls on one connection. Returns
+    /// [`SdkError::Denied`] if the token is not accepted and
+    /// [`SdkError::Protocol`] if the daemon is too old for sessions.
+    pub fn session(&self, token: &str) -> Result<Session, SdkError> {
+        let mut session = Session {
+            transport: self.transport.clone(),
+            token: token.to_string(),
+            stream: None,
+            service: String::new(),
+        };
+        session.connect()?;
+        Ok(session)
+    }
+
     fn send(&self, request: &Request) -> Result<Response, SdkError> {
         let mut bytes = serde_json::to_vec(request)
             .map_err(|e| SdkError::Protocol(format!("failed to encode request: {e}")))?;
@@ -438,6 +466,320 @@ impl std::fmt::Debug for Response {
             Response::Denied => write!(f, "Denied"),
             Response::NotFound => write!(f, "NotFound"),
             Response::Err(e) => write!(f, "Err({e:?})"),
+        }
+    }
+}
+
+/// Mirrors `cofferakd::protocol::MAX_BATCH_PATHS`: the most paths one
+/// `GetMany` request may carry. [`Session::get_many`] splits longer lists.
+const MAX_BATCH_PATHS: usize = 256;
+
+/// Wire-format session request, matching `cofferakd::protocol::RequestV2`.
+#[derive(Serialize)]
+enum SessionRequest<'a> {
+    Hello {
+        version: u32,
+    },
+    Auth {
+        method: &'a str,
+        credential: &'a str,
+    },
+    Get {
+        path: &'a str,
+    },
+    GetMany {
+        paths: &'a [String],
+    },
+    Set {
+        path: &'a str,
+        value: String,
+    },
+    Rm {
+        path: &'a str,
+    },
+    List {
+        prefix: &'a str,
+    },
+    Ping,
+}
+
+#[derive(Deserialize)]
+struct BatchItem {
+    path: String,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Wire-format session response, matching `cofferakd::protocol::ResponseV2`.
+#[derive(Deserialize)]
+enum SessionResponse {
+    Hello {
+        #[allow(dead_code)]
+        version: u32,
+    },
+    Authed {
+        service: String,
+    },
+    Value(String),
+    Values(Vec<BatchItem>),
+    Listed(Vec<String>),
+    Ok,
+    Denied,
+    NotFound,
+    Err(String),
+}
+
+impl SessionResponse {
+    /// The error for a response that is not the one a call expected.
+    fn into_error(self, what: &str) -> SdkError {
+        match self {
+            SessionResponse::Denied => SdkError::Denied,
+            SessionResponse::NotFound => SdkError::NotFound,
+            SessionResponse::Err(msg) => SdkError::Remote(msg),
+            _ => SdkError::Protocol(format!("unexpected response to {what}")),
+        }
+    }
+}
+
+enum Stream {
+    Unix(BufReader<UnixStream>),
+    Tls(Box<BufReader<StreamOwned<ClientConnection, TcpStream>>>),
+}
+
+impl Stream {
+    fn open(transport: &Transport) -> Result<Stream, SdkError> {
+        let timeout = Some(std::time::Duration::from_secs(30));
+        match transport {
+            Transport::Unix(socket_path) => {
+                let stream = UnixStream::connect(socket_path)?;
+                let _ = stream.set_read_timeout(timeout);
+                let _ = stream.set_write_timeout(timeout);
+                Ok(Stream::Unix(BufReader::new(stream)))
+            }
+            Transport::Tls {
+                addr,
+                server_name,
+                config,
+            } => {
+                let tcp = TcpStream::connect(addr)?;
+                let _ = tcp.set_read_timeout(timeout);
+                let _ = tcp.set_write_timeout(timeout);
+                let conn = ClientConnection::new(Arc::clone(config), server_name.clone())
+                    .map_err(|e| SdkError::Tls(format!("starting TLS handshake: {e}")))?;
+                Ok(Stream::Tls(Box::new(BufReader::new(StreamOwned::new(
+                    conn, tcp,
+                )))))
+            }
+        }
+    }
+
+    /// Send one request line and read one response line.
+    fn roundtrip(&mut self, request: &[u8], line: &mut Vec<u8>) -> std::io::Result<()> {
+        let read = match self {
+            Stream::Unix(reader) => {
+                reader.get_mut().write_all(request)?;
+                read_line_bounded(reader, line)?
+            }
+            Stream::Tls(reader) => {
+                reader.get_mut().write_all(request)?;
+                read_line_bounded(reader.as_mut(), line)?
+            }
+        };
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "cofferakd closed the connection",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// An authenticated connection to cofferakd (protocol version 2), from
+/// [`Client::session`].
+///
+/// One connection carries every call, so over TLS the handshake is paid
+/// once instead of once per secret. If the daemon closes the connection
+/// (it does after an idle period), the next call reconnects and
+/// authenticates again without the caller noticing.
+pub struct Session {
+    transport: Transport,
+    token: String,
+    stream: Option<Stream>,
+    service: String,
+}
+
+impl Session {
+    /// The service id the daemon knows this session's token as.
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+
+    /// Close the connection. The session reconnects if used again.
+    pub fn close(&mut self) {
+        self.stream = None;
+    }
+
+    fn connect(&mut self) -> Result<(), SdkError> {
+        self.stream = Some(Stream::open(&self.transport)?);
+        let result = self.handshake();
+        if result.is_err() {
+            self.stream = None;
+        }
+        result
+    }
+
+    fn handshake(&mut self) -> Result<(), SdkError> {
+        match self.roundtrip(&SessionRequest::Hello { version: 2 }) {
+            Ok(SessionResponse::Hello { .. }) => {}
+            Ok(_) | Err(SdkError::Protocol(_)) => {
+                return Err(SdkError::Protocol(
+                    "this cofferakd does not support sessions (protocol version 2), \
+                     upgrade it or use the per-call Client methods"
+                        .to_string(),
+                ))
+            }
+            Err(e) => return Err(e),
+        }
+        let token = self.token.clone();
+        match self.roundtrip(&SessionRequest::Auth {
+            method: "token",
+            credential: &token,
+        })? {
+            SessionResponse::Authed { service } => {
+                self.service = service;
+                Ok(())
+            }
+            other => Err(other.into_error("Auth")),
+        }
+    }
+
+    fn roundtrip(&mut self, request: &SessionRequest) -> Result<SessionResponse, SdkError> {
+        let mut bytes = serde_json::to_vec(request)
+            .map_err(|e| SdkError::Protocol(format!("failed to encode request: {e}")))?;
+        bytes.push(b'\n');
+        let stream = self.stream.as_mut().ok_or_else(|| {
+            SdkError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "session is not connected",
+            ))
+        })?;
+        let mut line = Vec::new();
+        stream.roundtrip(&bytes, &mut line)?;
+        serde_json::from_slice(&line)
+            .map_err(|e| SdkError::Protocol(format!("failed to decode response: {e}")))
+    }
+
+    /// Send one request. If the connection is gone, reconnect and send it
+    /// again once - except when `retry` is false (a request that must not
+    /// be repeated), where the connection error is returned.
+    fn call(&mut self, request: &SessionRequest, retry: bool) -> Result<SessionResponse, SdkError> {
+        if self.stream.is_none() {
+            self.connect()?;
+        }
+        match self.roundtrip(request) {
+            Err(SdkError::Io(e)) => {
+                self.stream = None;
+                if !retry {
+                    return Err(SdkError::Io(e));
+                }
+            }
+            other => return other,
+        }
+        self.connect()?;
+        let result = self.roundtrip(request);
+        if matches!(result, Err(SdkError::Io(_))) {
+            self.stream = None;
+        }
+        result
+    }
+
+    fn decode(value: &str) -> Result<Vec<u8>, SdkError> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(|e| SdkError::Protocol(format!("value was not valid base64: {e}")))
+    }
+
+    /// Read a secret's value.
+    pub fn get(&mut self, path: &str) -> Result<Vec<u8>, SdkError> {
+        match self.call(&SessionRequest::Get { path }, true)? {
+            SessionResponse::Value(value) => Self::decode(&value),
+            other => Err(other.into_error("Get")),
+        }
+    }
+
+    /// Read several secrets in one round trip. Returns the values of the
+    /// paths that exist, a path with no value is left out. Returns
+    /// [`SdkError::Denied`] if any path is outside what the token may read.
+    pub fn get_many(
+        &mut self,
+        paths: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, SdkError> {
+        let mut out = std::collections::BTreeMap::new();
+        for chunk in paths.chunks(MAX_BATCH_PATHS) {
+            let items = match self.call(&SessionRequest::GetMany { paths: chunk }, true)? {
+                SessionResponse::Values(items) => items,
+                other => return Err(other.into_error("GetMany")),
+            };
+            for item in items {
+                match (item.error.as_deref(), item.value) {
+                    (None, Some(value)) => {
+                        out.insert(item.path, Self::decode(&value)?);
+                    }
+                    (Some("not_found"), _) => {}
+                    (Some("denied"), _) => return Err(SdkError::Denied),
+                    _ => return Err(SdkError::Remote(format!("could not read {}", item.path))),
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read every secret under `prefix`.
+    pub fn get_all(
+        &mut self,
+        prefix: &str,
+    ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, SdkError> {
+        let paths = self.list(prefix)?;
+        self.get_many(&paths)
+    }
+
+    /// Write a secret's value. Requires a read-write token.
+    pub fn set(&mut self, path: &str, value: &[u8]) -> Result<(), SdkError> {
+        use base64::Engine;
+        let value = base64::engine::general_purpose::STANDARD.encode(value);
+        match self.call(&SessionRequest::Set { path, value }, true)? {
+            SessionResponse::Ok => Ok(()),
+            other => Err(other.into_error("Set")),
+        }
+    }
+
+    /// Remove a secret. Requires a read-write token.
+    pub fn rm(&mut self, path: &str) -> Result<(), SdkError> {
+        // Not repeated on a lost connection: a second try after a removal
+        // that did go through would wrongly report "not found".
+        match self.call(&SessionRequest::Rm { path }, false)? {
+            SessionResponse::Ok => Ok(()),
+            other => Err(other.into_error("Rm")),
+        }
+    }
+
+    /// List secret paths under `prefix`.
+    pub fn list(&mut self, prefix: &str) -> Result<Vec<String>, SdkError> {
+        match self.call(&SessionRequest::List { prefix }, true)? {
+            SessionResponse::Listed(paths) => Ok(paths),
+            other => Err(other.into_error("List")),
+        }
+    }
+
+    /// Check that the daemon answers on this session.
+    pub fn ping(&mut self) -> Result<(), SdkError> {
+        match self.call(&SessionRequest::Ping, true)? {
+            SessionResponse::Ok => Ok(()),
+            other => Err(other.into_error("Ping")),
         }
     }
 }

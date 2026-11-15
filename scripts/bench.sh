@@ -44,7 +44,8 @@ openssl req -x509 -new -sha384 -key "$WORKDIR/ca.key" -days 1 -subj "/CN=coffera
   -out "$WORKDIR/ca.pem" 2>/dev/null
 printf 'subjectAltName=DNS:%s\n' "$SERVER_NAME" > "$WORKDIR/ext.cnf"
 sign server "$SERVER_NAME" "$WORKDIR/ext.cnf"
-sign client sdk-smoke-service   # named after the service its token belongs to (ADR 0017)
+printf 'extendedKeyUsage=clientAuth\n' > "$WORKDIR/client.cnf"
+sign client sdk-smoke-service "$WORKDIR/client.cnf"   # named after the service its token belongs to (ADR 0017)
 
 cargo build --release --quiet -p cofferak-core --example crypto_bench
 cargo build --release --quiet -p cofferakd --example dev-daemon
@@ -74,6 +75,8 @@ export COFFERAK_TOKEN="$TOKEN"
 echo "== end to end: get =="
 COFFERAK_SOCKET="$SOCKET" "$BENCH" bench/unix "$REQUESTS" 1
 COFFERAK_SOCKET="$SOCKET" "$BENCH" bench/unix "$REQUESTS" 8
+COFFERAK_SOCKET="$SOCKET" "$BENCH" bench/unix "$REQUESTS" 1 session
+COFFERAK_SOCKET="$SOCKET" "$BENCH" bench/unix "$REQUESTS" 8 session
 
 export COFFERAK_TLS_ADDR="$TLS_ADDR" COFFERAK_TLS_SERVER_NAME="$SERVER_NAME" \
   COFFERAK_TLS_CA="$WORKDIR/ca.pem" COFFERAK_TLS_CLIENT_CERT="$WORKDIR/client.pem" \
@@ -81,3 +84,5 @@ export COFFERAK_TLS_ADDR="$TLS_ADDR" COFFERAK_TLS_SERVER_NAME="$SERVER_NAME" \
 TLS_REQUESTS=$(( REQUESTS / 10 ))
 "$BENCH" bench/tls "$TLS_REQUESTS" 1
 "$BENCH" bench/tls "$TLS_REQUESTS" 8
+"$BENCH" bench/tls "$REQUESTS" 1 session
+"$BENCH" bench/tls "$REQUESTS" 8 session

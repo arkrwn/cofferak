@@ -53,3 +53,15 @@ connection with no client cert, and
 rejecting a client cert signed by a different, untrusted CA - by
 [`sdk/python/cofferak_sdk/examples/smoke_tls.py`](https://github.com/arkrwn/cofferak/blob/main/sdk/python/cofferak_sdk/examples/smoke_tls.py),
 run by `scripts/server-mode-smoke.sh`.
+
+## Sessions
+
+For a service, open a session: one authenticated connection for every
+call, and many secrets in one round trip. It works the same over the Unix
+socket and over mutual TLS. See [Sessions](../sdks.md#sessions).
+
+```python
+with client.session(token) as s:
+    password = s.get("myapp/DB_PASSWORD")
+    config = s.get_all("myapp")   # {path: value} for everything under a prefix
+```
